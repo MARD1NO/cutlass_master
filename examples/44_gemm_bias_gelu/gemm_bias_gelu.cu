@@ -20,7 +20,7 @@ using ElementAccumulator = float;
 using ElementComputeEpilogue = ElementAccumulator; 
 using ElementInputA = cutlass::half_t; 
 using ElementInputB = cutlass::half_t;
-using ElementOutput = float; 
+using ElementOutput = cutlass::half_t;
 
 using LayoutInputA = cutlass::layout::ColumnMajor; 
 using LayoutInputB = cutlass::layout::ColumnMajor; 
@@ -33,6 +33,10 @@ using SmArch = cutlass::arch::Sm80;
 using ShapeMMAThreadBlock = cutlass::gemm::GemmShape<128, 128, 32>; 
 using ShapeMMAWarp = cutlass::gemm::GemmShape<64, 64, 32>; 
 using ShapeMMAOp = cutlass::gemm::GemmShape<16, 8, 8>; 
+
+// using ShapeMMAThreadBlock = cutlass::gemm::GemmShape<128, 128, 64>; 
+// using ShapeMMAWarp = cutlass::gemm::GemmShape<64, 64, 32>; 
+// using ShapeMMAOp = cutlass::gemm::GemmShape<16, 8, 8>; 
 
 using SwizzleThreadBlock = cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>; 
 
@@ -62,16 +66,35 @@ using Gemm = cutlass::gemm::device::Gemm<ElementInputA,
                                          SwizzleThreadBlock, 
                                          NumStages>; 
 
-ElementOutput host_gelu_func(ElementOutput val){
-  const ElementOutput temp = erf(val * static_cast<ElementOutput>(M_SQRT1_2));
-  const ElementOutput out = (val * static_cast<ElementOutput>(0.5) * (static_cast<ElementOutput>(1) + temp));
+ElementAccumulator host_gelu_func(ElementAccumulator val){
+  const ElementAccumulator temp = erf(val * static_cast<ElementAccumulator>(M_SQRT1_2));
+  const ElementAccumulator out = (val * static_cast<ElementAccumulator>(0.5) * (static_cast<ElementOutput>(1) + temp));
   return out; 
 }
 
+struct Result {
+
+  double runtime_ms;
+  cutlass::Status status;
+  cudaError_t error;
+  //
+  // Methods
+  //
+  Result(
+    double runtime_ms = 0,
+    cutlass::Status status = cutlass::Status::kSuccess,
+    cudaError_t error = cudaSuccess
+  ): runtime_ms(runtime_ms), status(status), error(error){ }
+};
+
 int run() {
-  const int length_m = 5120; 
-  const int length_n = 4096; 
-  const int length_k = 4096; 
+  // const int length_m = 2048; 
+  // const int length_n = 4096; 
+  // const int length_k = 16384; 
+
+  const int length_m = 5120;
+  const int length_n = 4096;
+  const int length_k = 4096;
 
   cutlass::gemm::GemmCoord problem_size(length_m, length_n, length_k); 
 
@@ -183,6 +206,89 @@ int run() {
             << std::endl;
 
   CUTLASS_CHECK(status);
+
+  // Profile. 
+  //
+  // Warm-up run of the grouped GEMM object
+  //
+
+  gemm_op(); 
+  
+  //
+  // Construct events
+  //
+
+  Result profile_result;
+
+  cudaEvent_t events[2];
+
+  for (auto & event : events) {
+    profile_result.error = cudaEventCreate(&event);
+    if (profile_result.error != cudaSuccess) {
+      std::cerr << "cudaEventCreate() failed: " << cudaGetErrorString(profile_result.error) << std::endl;
+      return -1;
+    }
+  }
+
+  // Record an event at the start of a series of GEMM operations
+  profile_result.error = cudaEventRecord(events[0]);
+  if (profile_result.error != cudaSuccess) {
+    std::cerr << "cudaEventRecord() failed: " << cudaGetErrorString(profile_result.error) << std::endl;
+    return -1; 
+  }
+
+  //
+  // Run profiling loop
+  //
+  const int32_t iter_num = 10; 
+  for (int iter = 0; iter < iter_num; ++iter) {
+    gemm_op(); 
+  }
+
+  //
+  // Stop profiling loop
+  //
+
+  // Record an event when the GEMM operations have been launched.
+  profile_result.error = cudaEventRecord(events[1]);
+  if (profile_result.error != cudaSuccess) {
+    std::cerr << "cudaEventRecord() failed: " << cudaGetErrorString(profile_result.error) << std::endl;
+    return -1; 
+  }
+
+  // Wait for work on the device to complete.
+  profile_result.error = cudaEventSynchronize(events[1]);
+  if (profile_result.error != cudaSuccess) {
+    std::cerr << "cudaEventSynchronize() failed: " << cudaGetErrorString(profile_result.error) << std::endl;
+    return -1;
+  }
+
+  // Measure elapsed runtime
+  float runtime_ms = 0;
+  profile_result.error = cudaEventElapsedTime(&runtime_ms, events[0], events[1]);
+  if (profile_result.error != cudaSuccess) {
+    std::cerr << "cudaEventElapsed() failed: " << cudaGetErrorString(profile_result.error) << std::endl;
+    return -1;
+  }
+
+  // Compute average runtime and GFLOPs.
+  profile_result.runtime_ms = double(runtime_ms) / double(iter_num);
+  
+  //
+  // Cleanup
+  //
+
+  for (auto event : events) {
+    (void)cudaEventDestroy(event);
+  }
+
+  std::cout << std::endl;
+  std::cout << "CUTLASS Gemm+Bias+GELU:\n"
+    << "====================================================" << std::endl;
+  std::cout << "    " << " {M, K, N} = {" << length_m \
+    << ", " << length_k << ", " << length_n <<"}." << std::endl;
+  std::cout << std::endl;
+  std::cout << "    " << "Runtime: " << profile_result.runtime_ms << " ms" << std::endl;
   return 0;
 
 }
