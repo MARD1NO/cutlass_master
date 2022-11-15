@@ -122,6 +122,7 @@ foreach(EXAMPLE
   41_multi_head_attention
   42_fused_multi_head_attention
   43_dual_gemm
+  44_gemm_bias_gelu
   )
 
   add_subdirectory(${EXAMPLE})
