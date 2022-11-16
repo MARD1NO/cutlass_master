@@ -63,6 +63,20 @@ template <
 using LinearCombinationGELU = LinearCombinationGeneric<GELU, ElementOutput_, Count, ElementAccumulator_,
                                                        ElementCompute_, Scale, Round, true>;
 
+
+template <
+  typename ElementOutput_,                             ///< Data type used to load and store tensors
+  int Count,                                           ///< Number of elements computed per operation
+                                                       ///< Usually it is 128/sizeof_bits<ElementOutput_>,
+                                                       ///< but we use 64 or 32 sometimes when there are not enough data to store
+  typename ElementAccumulator_ = ElementOutput_,       ///< Accumulator data type
+  typename ElementCompute_ = ElementOutput_,           ///< Data type used to compute linear combination
+  ScaleType::Kind Scale = ScaleType::Default,          ///< Control Alpha and Beta scaling
+  FloatRoundStyle Round = FloatRoundStyle::round_to_nearest
+>
+using LinearCombinationFastGELU = LinearCombinationGeneric<GELU_taylor, ElementOutput_, Count, ElementAccumulator_,
+                                                       ElementCompute_, Scale, Round, true>;
+
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 } // namespace thread
