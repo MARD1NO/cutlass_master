@@ -8,6 +8,8 @@
 #include "cutlass/cutlass.h"
 #include "cutlass/gemm/device/gemm.h"
 #include "cutlass/epilogue/thread/linear_combination_gelu.h"
+// #include "cutlass/epilogue/thread/linear_combination_relu.h"
+
 #include "cutlass/util/host_tensor.h"
 #include "cutlass/util/reference/device/gemm.h"
 #include "cutlass/util/reference/host/tensor_compare.h"
@@ -30,25 +32,36 @@ using MMAOp = cutlass::arch::OpClassTensorOp;
 using SmArch = cutlass::arch::Sm80;
 
 
-using ShapeMMAThreadBlock = cutlass::gemm::GemmShape<128, 128, 32>; 
-using ShapeMMAWarp = cutlass::gemm::GemmShape<64, 64, 32>; 
-using ShapeMMAOp = cutlass::gemm::GemmShape<16, 8, 8>; 
-
-// using ShapeMMAThreadBlock = cutlass::gemm::GemmShape<128, 128, 64>; 
+// using ShapeMMAThreadBlock = cutlass::gemm::GemmShape<128, 128, 32>; 
 // using ShapeMMAWarp = cutlass::gemm::GemmShape<64, 64, 32>; 
 // using ShapeMMAOp = cutlass::gemm::GemmShape<16, 8, 8>; 
 
-using SwizzleThreadBlock = cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>; 
 
-using EpilogueOp = cutlass::epilogue::thread::LinearCombinationGELU<
+// TileDescription([128, 128, 32], 5, [2, 2, 1], math_inst, min_cc, max_cc)
+using ShapeMMAThreadBlock = cutlass::gemm::GemmShape<128, 128, 32>; 
+using ShapeMMAWarp = cutlass::gemm::GemmShape<64, 64, 32>; 
+using ShapeMMAOp = cutlass::gemm::GemmShape<16, 8, 16>; 
+
+using SwizzleThreadBlock = cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>; 
+// using SwizzleThreadBlock = cutlass::gemm::threadblock::GemmSplitKHorizontalThreadblockSwizzle; 
+// using SwizzleThreadBlock = cutlass::gemm::threadblock::GemmSplitKIdentityThreadblockSwizzle<8>; 
+
+
+using EpilogueOp = cutlass::epilogue::thread::LinearCombinationFastGELU<
     ElementOutput, 
     128 / cutlass::sizeof_bits<ElementOutput>::value, 
     ElementAccumulator, 
     ElementComputeEpilogue, 
     cutlass::epilogue::thread::ScaleType::NoBetaScaling>; 
 
+// using EpilogueOp = cutlass::epilogue::thread::LinearCombinationRelu<
+//     ElementOutput, 
+//     128 / cutlass::sizeof_bits<ElementOutput>::value, 
+//     ElementAccumulator, 
+//     ElementComputeEpilogue, 
+//     cutlass::epilogue::thread::ScaleType::NoBetaScaling>; 
 
-constexpr int NumStages = 2; 
+constexpr int NumStages = 5; 
 
 using Gemm = cutlass::gemm::device::Gemm<ElementInputA, 
                                          LayoutInputA, 
@@ -64,7 +77,10 @@ using Gemm = cutlass::gemm::device::Gemm<ElementInputA,
                                          ShapeMMAOp, 
                                          EpilogueOp, 
                                          SwizzleThreadBlock, 
-                                         NumStages>; 
+                                         NumStages,
+                                         8/*kAlignmentA*/, 
+                                         8/*kAlignmentB*/, 
+                                         false/*bool SplitKSerial = false,*/>; 
 
 ElementAccumulator host_gelu_func(ElementAccumulator val){
   const ElementAccumulator temp = erf(val * static_cast<ElementAccumulator>(M_SQRT1_2));
@@ -92,8 +108,12 @@ int run() {
   // const int length_n = 4096; 
   // const int length_k = 16384; 
 
-  const int length_m = 5120;
-  const int length_n = 4096;
+  // const int length_m = 5120;
+  // const int length_n = 4096;
+  // const int length_k = 4096;
+
+  const int length_m = 4096;
+  const int length_n = 5120;
   const int length_k = 4096;
 
   cutlass::gemm::GemmCoord problem_size(length_m, length_n, length_k); 
@@ -140,7 +160,7 @@ int run() {
   tensor_b.sync_device(); 
   tensor_c_bias.sync_device(); 
   tensor_d.sync_device(); 
-  tensor_ref_d.sync_device(); 
+  tensor_ref_d.sync_device();   
 
   ElementComputeEpilogue alpha = ElementComputeEpilogue(1); 
 
@@ -218,77 +238,77 @@ int run() {
   // Construct events
   //
 
-  Result profile_result;
+  // Result profile_result;
 
-  cudaEvent_t events[2];
+  // cudaEvent_t events[2];
 
-  for (auto & event : events) {
-    profile_result.error = cudaEventCreate(&event);
-    if (profile_result.error != cudaSuccess) {
-      std::cerr << "cudaEventCreate() failed: " << cudaGetErrorString(profile_result.error) << std::endl;
-      return -1;
-    }
-  }
+  // for (auto & event : events) {
+  //   profile_result.error = cudaEventCreate(&event);
+  //   if (profile_result.error != cudaSuccess) {
+  //     std::cerr << "cudaEventCreate() failed: " << cudaGetErrorString(profile_result.error) << std::endl;
+  //     return -1;
+  //   }
+  // }
 
-  // Record an event at the start of a series of GEMM operations
-  profile_result.error = cudaEventRecord(events[0]);
-  if (profile_result.error != cudaSuccess) {
-    std::cerr << "cudaEventRecord() failed: " << cudaGetErrorString(profile_result.error) << std::endl;
-    return -1; 
-  }
+  // // Record an event at the start of a series of GEMM operations
+  // profile_result.error = cudaEventRecord(events[0]);
+  // if (profile_result.error != cudaSuccess) {
+  //   std::cerr << "cudaEventRecord() failed: " << cudaGetErrorString(profile_result.error) << std::endl;
+  //   return -1; 
+  // }
 
-  //
-  // Run profiling loop
-  //
-  const int32_t iter_num = 10; 
-  for (int iter = 0; iter < iter_num; ++iter) {
-    gemm_op(); 
-  }
+  // //
+  // // Run profiling loop
+  // //
+  // const int32_t iter_num = 1; 
+  // for (int iter = 0; iter < iter_num; ++iter) {
+  //   gemm_op(); 
+  // }
 
-  //
-  // Stop profiling loop
-  //
+  // //
+  // // Stop profiling loop
+  // //
 
-  // Record an event when the GEMM operations have been launched.
-  profile_result.error = cudaEventRecord(events[1]);
-  if (profile_result.error != cudaSuccess) {
-    std::cerr << "cudaEventRecord() failed: " << cudaGetErrorString(profile_result.error) << std::endl;
-    return -1; 
-  }
+  // // Record an event when the GEMM operations have been launched.
+  // profile_result.error = cudaEventRecord(events[1]);
+  // if (profile_result.error != cudaSuccess) {
+  //   std::cerr << "cudaEventRecord() failed: " << cudaGetErrorString(profile_result.error) << std::endl;
+  //   return -1; 
+  // }
 
-  // Wait for work on the device to complete.
-  profile_result.error = cudaEventSynchronize(events[1]);
-  if (profile_result.error != cudaSuccess) {
-    std::cerr << "cudaEventSynchronize() failed: " << cudaGetErrorString(profile_result.error) << std::endl;
-    return -1;
-  }
+  // // Wait for work on the device to complete.
+  // profile_result.error = cudaEventSynchronize(events[1]);
+  // if (profile_result.error != cudaSuccess) {
+  //   std::cerr << "cudaEventSynchronize() failed: " << cudaGetErrorString(profile_result.error) << std::endl;
+  //   return -1;
+  // }
 
-  // Measure elapsed runtime
-  float runtime_ms = 0;
-  profile_result.error = cudaEventElapsedTime(&runtime_ms, events[0], events[1]);
-  if (profile_result.error != cudaSuccess) {
-    std::cerr << "cudaEventElapsed() failed: " << cudaGetErrorString(profile_result.error) << std::endl;
-    return -1;
-  }
+  // // Measure elapsed runtime
+  // float runtime_ms = 0;
+  // profile_result.error = cudaEventElapsedTime(&runtime_ms, events[0], events[1]);
+  // if (profile_result.error != cudaSuccess) {
+  //   std::cerr << "cudaEventElapsed() failed: " << cudaGetErrorString(profile_result.error) << std::endl;
+  //   return -1;
+  // }
 
-  // Compute average runtime and GFLOPs.
-  profile_result.runtime_ms = double(runtime_ms) / double(iter_num);
+  // // Compute average runtime and GFLOPs.
+  // profile_result.runtime_ms = double(runtime_ms) / double(iter_num);
   
-  //
-  // Cleanup
-  //
+  // //
+  // // Cleanup
+  // //
 
-  for (auto event : events) {
-    (void)cudaEventDestroy(event);
-  }
+  // for (auto event : events) {
+  //   (void)cudaEventDestroy(event);
+  // }
 
-  std::cout << std::endl;
-  std::cout << "CUTLASS Gemm+Bias+GELU:\n"
-    << "====================================================" << std::endl;
-  std::cout << "    " << " {M, K, N} = {" << length_m \
-    << ", " << length_k << ", " << length_n <<"}." << std::endl;
-  std::cout << std::endl;
-  std::cout << "    " << "Runtime: " << profile_result.runtime_ms << " ms" << std::endl;
+  // std::cout << std::endl;
+  // std::cout << "CUTLASS Gemm+Bias+GELU:\n"
+  //   << "====================================================" << std::endl;
+  // std::cout << "    " << " {M, K, N} = {" << length_m \
+  //   << ", " << length_k << ", " << length_n <<"}." << std::endl;
+  // std::cout << std::endl;
+  // std::cout << "    " << "Runtime: " << profile_result.runtime_ms << " ms" << std::endl;
   return 0;
 
 }
