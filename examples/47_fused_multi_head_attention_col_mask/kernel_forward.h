@@ -631,43 +631,7 @@ struct AttentionKernel {
               (tb_tile_offset.n() * MM0::Mma::WarpCount::kN) +
                   (my_warp_id / MM0::Mma::WarpCount::kM)};
 
-      // // Mask out last if causal
-      // if (p.causal && p.num_keys - iter_key_start <= kKeysPerBlock) {
-      //   auto query_start = blockIdx.x * kQueriesPerBlock;
-      //   auto lane_offset = MM0::ScalingCoefsUpdater::get_lane_offset(
-      //       lane_id(), warp_id(), iteratorC_tile_offset);
-      //   int32_t last_col;
-      //   MM0::ScalingCoefsUpdater::iterateRows(
-      //       lane_offset,
-      //       [&](int accum_m) {
-      //         last_col = query_start + accum_m - iter_key_start;
-      //         // if(accum_m == 0){
-      //         //   printf("Accum m is: %d, query_start is: %d, iter_key_start is: %d Last col is: %d maskoffset is: %d \n", accum_m, query_start, iter_key_start, last_col, p.mask_offset); 
-      //         // }
-      //         // if(accum_m == 1){
-      //         //   printf("Accum m is: %d, query_start is: %d, iter_key_start is: %d Last col is: %d maskoffset is: %d \n", accum_m, query_start, iter_key_start, last_col, p.mask_offset); 
-      //         // }
-      //         // if(accum_m == 2){
-      //         //   printf("Accum m is: %d, query_start is: %d, iter_key_start is: %d Last col is: %d maskoffset is: %d \n", accum_m, query_start, iter_key_start, last_col, p.mask_offset); 
-      //         // }
-      //         // if(accum_m == 3){
-      //         //   printf("Accum m is: %d, query_start is: %d, iter_key_start is: %d Last col is: %d maskoffset is: %d \n", accum_m, query_start, iter_key_start, last_col, p.mask_offset); 
-      //         // }
-      //         // Accum m is: 12, query_start is: 64, iter_key_start is: 64 Last col is: 12 maskoffset is: 4 
-      //         printf("Accum m is: %d, query_start is: %d, iter_key_start is: %d Last col is: %d maskoffset is: %d \n", accum_m, query_start, iter_key_start, last_col, p.mask_offset); 
-      //       },
-      //       [&](int accum_m, int accum_n, int idx) {
-      //         if (accum_n > last_col) {
-      //           accum[idx] =
-      //               -cutlass::platform::numeric_limits<accum_t>::infinity();
-      //         }
-      //       },
-      //       [&](int accum_m) {});
-      // }
-
       // Mask out (zhengzekang)
-      // printf("P num keys is: %d, iter_key_start is: %d \n", p.num_keys, iter_key_start); 
-      // if (p.causal && p.num_keys - iter_key_start <= kKeysPerBlock) {
       if (p.causal && p.mask_offset > 0) {
         auto query_start = blockIdx.x * kQueriesPerBlock;
         auto lane_offset = MM0::ScalingCoefsUpdater::get_lane_offset(
@@ -678,10 +642,17 @@ struct AttentionKernel {
             [&](int accum_m) {
               last_col = (p.mask_offset - 1);
             },
+            /*
+            author (zhengzekang)
+            注意这里是在一块tile内执行矩阵乘法计算
+            而我们需要将整个矩阵的 mask_offset:end 部分mask掉，所以要将tile内的列索引转换成全局索引
+            而转换也很简单，就是accum_n(tile内列索引) + 当前全局key_iter的索引(iter_key_start)
+            */
             [&](int accum_m, int accum_n, int idx) {
               if (accum_n + iter_key_start> last_col) {
                 accum[idx] =
                     -cutlass::platform::numeric_limits<accum_t>::infinity();
+                // accum[idx] += mask_ptr[idx]; 
               }
             },
             [&](int accum_m) {});

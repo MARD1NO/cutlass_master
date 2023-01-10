@@ -170,6 +170,7 @@ struct Options {
   int seq_length_kv;
   int iterations;
   int mask_offset; 
+  bool use_petr_mask; 
 
   // alpha0, alpha1 and beta are fixed 
   // in this multi-head attention example
@@ -195,7 +196,8 @@ struct Options {
     use_mask(false),
     iterations(20),
     causal(false), 
-    mask_offset(128)
+    mask_offset(128), 
+    use_petr_mask(true)
   { }
 
   // Parses the command line
@@ -221,6 +223,7 @@ struct Options {
 
     // mask_offset should be less than seq_length kv
     cmd.get_cmd_line_argument("mask_offset", mask_offset, 128);
+    cmd.get_cmd_line_argument("use_petr_mask", use_petr_mask, true);
 
     randomize_problems();
 
@@ -291,7 +294,8 @@ struct Options {
       << "  --iterations=<int>          Number of profiling iterations to perform.\n"
       << "  --reference-check=<bool>    If true, performs reference check.\n"
       << "  --causal=<bool>             If true, uses causal masking.\n"
-      << "  --mask_offset=<int>         mask_offset. \n";
+      << "  --mask_offset=<int>         mask_offset. \n"
+      << "  --use_petr_mask=<bool>      If true, we will set a shape (1, 1, 1, key_seq_len) mask. \n";
 
     return out;
   }
@@ -357,6 +361,8 @@ public:
   using LayoutP = cutlass::layout::RowMajor;
   using LayoutV = cutlass::layout::RowMajor;
   using LayoutO = cutlass::layout::RowMajor;
+  using LayoutMask = cutlass::layout::RowMajor;
+
 
   using MatrixCoord = typename LayoutP::TensorCoord;
 
@@ -374,6 +380,7 @@ private:
   cutlass::Distribution::Kind init_P;
   cutlass::Distribution::Kind init_V;
   cutlass::Distribution::Kind init_O;
+  cutlass::Distribution::Kind init_PETR_MASK;
   uint32_t seed;
 
   cutlass::DeviceAllocation<cutlass::gemm::GemmCoord> problem_sizes_device0;
@@ -392,6 +399,8 @@ private:
   std::vector<int64_t> ldv_host;
   std::vector<int64_t> ldo_host;
   std::vector<int64_t> seqlen_host;
+  std::vector<int64_t> ldmask_host;
+
 
   cutlass::DeviceAllocation<int64_t> ldq;
   cutlass::DeviceAllocation<int64_t> ldk;
@@ -399,6 +408,7 @@ private:
   cutlass::DeviceAllocation<int64_t> ldv;
   cutlass::DeviceAllocation<int64_t> ldo;
   cutlass::DeviceAllocation<int64_t> seqlen;
+  cutlass::DeviceAllocation<int64_t> ldmask;
 
   cutlass::DeviceAllocation<ElementQ> block_Q;
   cutlass::DeviceAllocation<ElementK> block_K;
@@ -407,6 +417,8 @@ private:
   cutlass::DeviceAllocation<ElementO> block_O;
   cutlass::DeviceAllocation<ElementNorm> block_Norm;
   cutlass::DeviceAllocation<ElementSum> block_Sum;
+  cutlass::DeviceAllocation<ElementP> block_petr_mask;
+
 
   cutlass::DeviceAllocation<int64_t> offset_P_Device;
 
@@ -415,6 +427,7 @@ private:
   cutlass::DeviceAllocation<ElementP *> ptr_P;
   cutlass::DeviceAllocation<ElementV *> ptr_V;
   cutlass::DeviceAllocation<ElementO *> ptr_O;
+  cutlass::DeviceAllocation<ElementP *> ptr_petr_mask;
 
 public:
 
@@ -429,9 +442,10 @@ public:
     cutlass::Distribution::Kind init_P_ = cutlass::Distribution::Uniform,
     cutlass::Distribution::Kind init_V_ = cutlass::Distribution::Uniform,
     cutlass::Distribution::Kind init_O_ = cutlass::Distribution::Uniform,
+    cutlass::Distribution::Kind init_PETR_MASK_ = cutlass::Distribution::Uniform,
     uint32_t seed_ = 3080
   ):
-    options(options_), init_Q(init_Q_), init_K(init_K_), init_P(init_P_), init_V(init_V_), init_O(init_O_), seed(seed_) { }
+    options(options_), init_Q(init_Q_), init_K(init_K_), init_P(init_P_), init_V(init_V_), init_O(init_O_), init_PETR_MASK(init_PETR_MASK_), seed(seed_) { }
 
   int problem_count() const {
     return (options.head_number * options.batch_size);
@@ -512,6 +526,7 @@ private:
     int64_t total_elements_P = 0;
     int64_t total_elements_V = 0;
     int64_t total_elements_O = 0;
+    int64_t total_elements_petr_mask = 0; 
 
     ldq_host.resize(problem_count());
     ldk_host.resize(problem_count());
@@ -519,6 +534,7 @@ private:
     ldv_host.resize(problem_count());
     ldo_host.resize(problem_count());
     seqlen_host.resize(problem_count());
+    ldmask_host.resize(1); 
 
     for (int32_t i = 0; i < problem_count(); ++i) {
 
@@ -530,6 +546,7 @@ private:
       ldp_host.at(i) = LayoutP::packed({problem0.m(), problem0.n()}).stride(0);
       ldv_host.at(i) = LayoutV::packed({problem1.k(), problem1.n()}).stride(0);
       ldo_host.at(i) = LayoutO::packed({problem1.m(), problem1.n()}).stride(0);
+      
 
       // m = n for attention problems.
       seqlen_host.at(i) = problem0.m();
@@ -553,6 +570,12 @@ private:
       total_elements_O += elements_O;
     }
 
+    auto problem0 = options.problem_sizes0.at(0);
+    ldmask_host.at(0) = LayoutMask::packed({1, problem0.n()}).stride(0);
+    printf("Ld mask host 0 is: %ld \n", ldmask_host.at(0)); 
+    total_elements_petr_mask += problem0.n();
+    printf("Total element petr mask is: %ld \n", total_elements_petr_mask); 
+
     problem_sizes_device0.reset(problem_count());
     problem_sizes_device1.reset(problem_count());
     problem_sizes_device0.copy_from_host(options.problem_sizes0.data());
@@ -569,6 +592,7 @@ private:
     ldv.reset(problem_count());
     ldo.reset(problem_count());
     seqlen.reset(problem_count());
+    ldmask.reset(1); 
 
     ldq.copy_from_host(ldq_host.data());
     ldk.copy_from_host(ldk_host.data());
@@ -576,6 +600,7 @@ private:
     ldv.copy_from_host(ldv_host.data());
     ldo.copy_from_host(ldo_host.data());
     seqlen.copy_from_host(seqlen_host.data());
+    ldmask.copy_from_host(ldmask_host.data());
 
     //
     // Assign pointers
@@ -586,6 +611,7 @@ private:
     block_P.reset(total_elements_P);
     block_V.reset(total_elements_V);
     block_O.reset(total_elements_O);
+    block_petr_mask.reset(total_elements_petr_mask); 
 
     offset_P_Device.reset(problem_count());
 
@@ -599,6 +625,8 @@ private:
     std::vector<ElementO *> ptr_O_host(problem_count());
     std::vector<ElementNorm *> ptr_norm_host(problem_count());
     std::vector<ElementSum *> ptr_sum_host(problem_count());
+
+    std::vector<ElementP *> ptr_petr_mask_host(1);
 
     for (int32_t i = 0; i < problem_count(); ++i) {
       ptr_Q_host.at(i) = block_Q.get() + offset_Q.at(i);
@@ -623,6 +651,9 @@ private:
     ptr_O.reset(problem_count());
     ptr_O.copy_from_host(ptr_O_host.data());
 
+    ptr_petr_mask.reset(1);
+    ptr_petr_mask.copy_from_host(ptr_petr_mask_host.data());
+
     //
     // Initialize the problems of the workspace
     //
@@ -631,6 +662,7 @@ private:
     initialize_tensor_(block_K.get(), total_elements_K, init_K, seed + 2);
     initialize_tensor_(block_V.get(), total_elements_V, init_V, seed + 3);
 
+    initialize_tensor_(block_petr_mask.get(), total_elements_petr_mask, init_PETR_MASK, seed + 4);
   }
 
   template<typename Element>
@@ -690,12 +722,14 @@ private:
       LayoutP layout_P(ldp_host.at(i));
       LayoutV layout_V(ldv_host.at(i));
       LayoutO layout_O(ldo_host.at(i));
+      LayoutMask layout_PETR_MASK(ldmask_host.at(0));
 
       MatrixCoord extent_Q{problem0.m(), problem0.k()};
       MatrixCoord extent_K{problem0.k(), problem0.n()};
       MatrixCoord extent_P{problem0.m(), problem0.n()};
       MatrixCoord extent_V{problem1.k(), problem1.n()};
       MatrixCoord extent_O{problem1.m(), problem1.n()};
+      MatrixCoord extent_PETR_MASK{1, problem0.n()};
 
       cutlass::TensorView<ElementQ, LayoutQ> view_Q(block_Q.get() + offset_Q.at(i), layout_Q, extent_Q);
       cutlass::TensorView<ElementK, LayoutK> view_K(block_K.get() + offset_K.at(i), layout_K, extent_K);
@@ -736,6 +770,12 @@ private:
       std::vector<ElementNorm> vector_Norm_Ref(problem0.m());
       std::vector<ElementSum> vector_Sum_Ref(problem0.m());
 
+
+      std::vector<ElementP> petr_mask_Ref(layout_PETR_MASK.capacity(extent_PETR_MASK));
+      cutlass::device_memory::copy_to_host(petr_mask_Ref.data(), block_petr_mask.get(), petr_mask_Ref.size());
+      cutlass::TensorView<ElementP, LayoutP> view_PETR_MASK_host(petr_mask_Ref.data(), layout_PETR_MASK, extent_PETR_MASK);
+
+
       int n_dim = options.use_mask ? options.problem_sizes0_real.at(i).n() : problem0.n();
 
       // Compute softmax for referece matrix
@@ -749,9 +789,38 @@ private:
         //   n_dim_row = std::min(m + 1, n_dim);
         // }
 
-        // author (zhengzekang)
-        if (options.causal && options.mask_offset > 0) {
-          n_dim_row = options.mask_offset;
+        /*
+        author (zhengzekang)
+        Under here is mask offset code
+        // // author (zhengzekang) use mask_offset
+        // if (options.causal && options.mask_offset > 0) {
+        //   n_dim_row = options.mask_offset;
+        // }
+
+        // ElementSoftmaxCompute max = ElementSoftmaxCompute(view_Ref_host.ref().at({m, 0}));
+        // for (int n = 1; n < n_dim_row; n++) {
+        //    max = std::max(max, ElementSoftmaxCompute(view_Ref_host.ref().at({m, n})));
+        // }
+
+        // vector_Norm_Ref.at(m) = ElementNorm(max);
+
+        // ElementSoftmaxCompute sum = ElementSoftmaxCompute();
+        // for (int n = 0; n < n_dim_row; n++) {
+        //   sum += std::exp( ElementSoftmaxCompute(view_Ref_host.ref().at({m, n})) - max );
+        // }
+        // ElementSoftmaxCompute inv_sum = ElementSoftmaxCompute(1.0f / sum);
+
+        // vector_Sum_Ref.at(m) = ElementSum(inv_sum);
+        
+        */
+
+        // author (zhengzekang) PETR_MASK: add(1, 1, 1, k_seq_len) to Attention Matrix(b, num_head, q_seq_len, k_seq_len)
+        if (options.causal && options.use_petr_mask > 0) {
+          for (int n = 0; n < n_dim_row; n++) {
+            // Mask shape is: (1, k_seq_len)
+            // printf("mask is: %f \n", float(view_PETR_MASK_host.ref().at({0, n}))); 
+            view_Ref_host.ref().at({m, n}) += view_PETR_MASK.ref().at({0, n}); 
+          }
         }
 
         ElementSoftmaxCompute max = ElementSoftmaxCompute(view_Ref_host.ref().at({m, 0}));
