@@ -522,11 +522,18 @@ private:
 
     ldq_host.resize(problem_count());
     ldk_host.resize(problem_count());
-    ldbias_host.resize(problem_count());
+    // ldbias_host.resize(problem_count());
+    ldbias_host.resize(1);
     ldp_host.resize(problem_count());
     ldv_host.resize(problem_count());
     ldo_host.resize(problem_count());
     seqlen_host.resize(problem_count());
+
+    auto problem0 = options.problem_sizes0.at(0);
+    auto problem1 = options.problem_sizes1.at(0);
+    ldbias_host.at(0) = LayoutBias::packed({problem0.m(), problem0.n()}).stride(0);
+    offset_Bias.push_back(total_elements_Bias);
+    total_elements_Bias += problem0.m() * problem0.n();
 
     for (int32_t i = 0; i < problem_count(); ++i) {
 
@@ -535,7 +542,7 @@ private:
 
       ldq_host.at(i) = LayoutQ::packed({problem0.m(), problem0.k()}).stride(0);
       ldk_host.at(i) = LayoutK::packed({problem0.k(), problem0.n()}).stride(0);
-      ldbias_host.at(i) = LayoutBias::packed({problem0.m(), problem0.n()}).stride(0);
+      // ldbias_host.at(i) = LayoutBias::packed({problem0.m(), problem0.n()}).stride(0);
       ldp_host.at(i) = LayoutP::packed({problem0.m(), problem0.n()}).stride(0);
       ldv_host.at(i) = LayoutV::packed({problem1.k(), problem1.n()}).stride(0);
       ldo_host.at(i) = LayoutO::packed({problem1.m(), problem1.n()}).stride(0);
@@ -545,21 +552,21 @@ private:
 
       offset_Q.push_back(total_elements_Q);
       offset_K.push_back(total_elements_K);
-      offset_Bias.push_back(total_elements_Bias);
+      // offset_Bias.push_back(total_elements_Bias);
       offset_P.push_back(total_elements_P);
       offset_V.push_back(total_elements_V);
       offset_O.push_back(total_elements_O);
 
       int64_t elements_Q = problem0.m() * problem0.k();
       int64_t elements_K = problem0.k() * problem0.n();
-      int64_t elements_Bias = problem0.m() * problem0.n();
+      // int64_t elements_Bias = problem0.m() * problem0.n();
       int64_t elements_P = problem0.m() * problem0.n();
       int64_t elements_V = problem1.k() * problem1.n();
       int64_t elements_O = problem1.m() * problem1.n();
 
       total_elements_Q += elements_Q;
       total_elements_K += elements_K;
-      total_elements_Bias += elements_Bias;
+      // total_elements_Bias += elements_Bias;
       total_elements_P += elements_P;
       total_elements_V += elements_V;
       total_elements_O += elements_O;
@@ -577,7 +584,8 @@ private:
 
     ldq.reset(problem_count());
     ldk.reset(problem_count());
-    ldbias.reset(problem_count());
+    // ldbias.reset(problem_count());
+    ldbias.reset(1);
     ldp.reset(problem_count());
     ldv.reset(problem_count());
     ldo.reset(problem_count());
@@ -609,7 +617,8 @@ private:
 
     std::vector<ElementQ *> ptr_Q_host(problem_count());
     std::vector<ElementK *> ptr_K_host(problem_count());
-    std::vector<ElementBias *> ptr_Bias_host(problem_count());
+    // std::vector<ElementBias *> ptr_Bias_host(problem_count());
+    std::vector<ElementBias *> ptr_Bias_host(1);
     std::vector<ElementP *> ptr_P_host(problem_count());
     std::vector<ElementV *> ptr_V_host(problem_count());
     std::vector<ElementO *> ptr_O_host(problem_count());
@@ -619,11 +628,12 @@ private:
     for (int32_t i = 0; i < problem_count(); ++i) {
       ptr_Q_host.at(i) = block_Q.get() + offset_Q.at(i);
       ptr_K_host.at(i) = block_K.get() + offset_K.at(i);
-      ptr_Bias_host.at(i) = block_Bias.get() + offset_Bias.at(i);
       ptr_P_host.at(i) = block_P.get() + offset_P.at(i);
       ptr_V_host.at(i) = block_V.get() + offset_V.at(i);
       ptr_O_host.at(i) = block_O.get() + offset_O.at(i);
     }
+    ptr_Bias_host.at(0) = block_Bias.get() + offset_Bias.at(0);
+
 
     ptr_Q.reset(problem_count());
     ptr_Q.copy_from_host(ptr_Q_host.data());
@@ -631,7 +641,8 @@ private:
     ptr_K.reset(problem_count());
     ptr_K.copy_from_host(ptr_K_host.data());
 
-    ptr_Bias.reset(problem_count());
+    // ptr_Bias.reset(problem_count());
+    ptr_Bias.reset(1);
     ptr_Bias.copy_from_host(ptr_Bias_host.data());
     
     ptr_P.reset(problem_count());
@@ -692,7 +703,8 @@ private:
 
       LayoutQ layout_Q(ldq_host.at(i));
       LayoutK layout_K(ldk_host.at(i));
-      LayoutBias layout_Bias(ldbias_host.at(i));
+      // LayoutBias layout_Bias(ldbias_host.at(i));
+      LayoutBias layout_Bias(ldbias_host.at(0));
       LayoutP layout_P(ldp_host.at(i));
       LayoutV layout_V(ldv_host.at(i));
       LayoutO layout_O(ldo_host.at(i));
@@ -744,7 +756,8 @@ private:
       std::vector<ElementSum> vector_Sum_Ref(problem0.m());
 
       std::vector<ElementBias> bias_Ref(layout_Bias.capacity(extent_Bias));
-      cutlass::device_memory::copy_to_host(bias_Ref.data(), block_Bias.get() + offset_Bias.at(i), bias_Ref.size());
+      // cutlass::device_memory::copy_to_host(bias_Ref.data(), block_Bias.get() + offset_Bias.at(i), bias_Ref.size());
+      cutlass::device_memory::copy_to_host(bias_Ref.data(), block_Bias.get(), bias_Ref.size());
       cutlass::TensorView<ElementBias, LayoutBias> bias_Ref_host(bias_Ref.data(), layout_Bias, extent_Bias);
 
       int n_dim = options.use_mask ? options.problem_sizes0_real.at(i).n() : problem0.n();

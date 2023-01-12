@@ -185,7 +185,8 @@ struct AttentionKernel {
           head_id * o_strideH;
 
       if (attn_bias_ptr != nullptr) {
-        const int64_t bias_offset = (batch_id * bias_strideB) + (head_id * bias_strideH); 
+        // const int64_t bias_offset = (batch_id * bias_strideB) + (head_id * bias_strideH); 
+        const int64_t bias_offset = (batch_id * bias_strideB) + (0 * bias_strideH); 
         attn_bias_ptr += bias_offset; 
       }
 
