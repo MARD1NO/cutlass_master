@@ -121,18 +121,24 @@ struct AttentionKernel {
     int32_t q_strideH;
     int32_t k_strideH;
     int32_t v_strideH;
-    int32_t bias_strideH;
+    
+    int32_t o_strideH;
+
+    int64_t bias_strideH;
 
     int64_t q_strideB;
     int64_t k_strideB;
     int64_t v_strideB;
-    int32_t bias_strideB;
+    
+    int64_t o_strideB;
+
+    int64_t bias_strideB;
 
     int32_t num_batches;
     int32_t num_heads;
 
     CUTLASS_HOST_DEVICE int32_t o_strideM() const {
-      return head_dim_value * num_heads;
+      return head_dim_value;
     }
     // Moves pointers to what we should process
     // Returns "false" if there is no work to do
@@ -165,7 +171,7 @@ struct AttentionKernel {
         value_ptr += batch_id * v_strideB;
         output_ptr += int64_t(batch_id * num_queries) * o_strideM();
         if (output_accum_ptr != nullptr) {
-          output_accum_ptr += int64_t(batch_id * num_queries) * o_strideM();
+          output_accum_ptr += batch_id * o_strideB;
         }
         q_start = 0;
         k_start = 0;
@@ -176,15 +182,16 @@ struct AttentionKernel {
       key_ptr += k_start * k_strideM + head_id * k_strideH;
       value_ptr += k_start * v_strideM + head_id * v_strideH;
       output_ptr += int64_t(q_start + query_start) * o_strideM() +
-          head_id * head_dim_value;
+          head_id * o_strideH;
 
       if (attn_bias_ptr != nullptr) {
-        attn_bias_ptr += (batch_id * bias_strideB) + (head_id * bias_strideH);
+        const int64_t bias_offset = (batch_id * bias_strideB) + (head_id * bias_strideH); 
+        attn_bias_ptr += bias_offset; 
       }
 
       if (output_accum_ptr != nullptr) {
         output_accum_ptr += int64_t(q_start + query_start) * o_strideM() +
-            head_id * head_dim_value;
+            head_id * o_strideH;
       } else {
         // Accumulate directly in the destination buffer (eg for f32)
         output_accum_ptr = (accum_t*)output_ptr;
@@ -599,8 +606,10 @@ struct AttentionKernel {
 
       // apply attention bias if applicable
       if (p.attn_bias_ptr != nullptr) {
-        auto query_start = blockIdx.x * kQueriesPerBlock;
         // load bias tile Bij into shared memory
+        // if(iter_key_start != 0){
+          // printf("query_start * p.bias_strideM is: %d, iter_key_start is: %d \n", query_start * p.bias_strideM, iter_key_start); 
+        // }
         typename MM0::BiasLoader::GmemTileIterator bias_iter(
             {cutlass::layout::RowMajor(p.bias_strideM)},
             // attn_bias_pointer points to matrix of size (n_queries, n_keys)
@@ -622,34 +631,9 @@ struct AttentionKernel {
             lane_offset,
             [&](int accum_m) {},
             [&](int accum_m, int accum_n, int idx) {
-              // if (accum_m < problem_size_0_m && accum_n < problem_size_0_n) {
-              //   accum[idx] += bias_tensor_ref.at({accum_m, accum_n});
-              // }
-
               if (accum_m < problem_size_0_m && accum_n < problem_size_0_n) {
-                // if(threadIdx.x == 0 && threadIdx.y == 0){
-                //   for(int32_t row_ii = 0; row_ii < 16; row_ii++){
-                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 0, static_cast<float>(bias_tensor_ref.at({row_ii, 0}))); 
-                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 1, static_cast<float>(bias_tensor_ref.at({row_ii, 1}))); 
-                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 2, static_cast<float>(bias_tensor_ref.at({row_ii, 2}))); 
-                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 3, static_cast<float>(bias_tensor_ref.at({row_ii, 3}))); 
-                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 4, static_cast<float>(bias_tensor_ref.at({row_ii, 4}))); 
-                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 5, static_cast<float>(bias_tensor_ref.at({row_ii, 5}))); 
-                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 6, static_cast<float>(bias_tensor_ref.at({row_ii, 6}))); 
-                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 7, static_cast<float>(bias_tensor_ref.at({row_ii, 7}))); 
-                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 8, static_cast<float>(bias_tensor_ref.at({row_ii, 8}))); 
-                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 9, static_cast<float>(bias_tensor_ref.at({row_ii, 9}))); 
-                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 10, static_cast<float>(bias_tensor_ref.at({row_ii, 10}))); 
-                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 11, static_cast<float>(bias_tensor_ref.at({row_ii, 11}))); 
-                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 12, static_cast<float>(bias_tensor_ref.at({row_ii, 12}))); 
-                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 13, static_cast<float>(bias_tensor_ref.at({row_ii, 13}))); 
-                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 14, static_cast<float>(bias_tensor_ref.at({row_ii, 14}))); 
-                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 15, static_cast<float>(bias_tensor_ref.at({row_ii, 15}))); 
-                //   }
-                // }
-                // printf("Accum[idx] is: %f, bias[accum_m_idx: %d, accum_n_idx: %d] is: %f \n", static_cast<float>(accum[idx]), accum_m, accum_n, static_cast<float>(bias_tensor_ref.at({accum_m, accum_n}))); 
+                // printf("Accum[idx] is: %f, bias[accum_m_idx: %d, accum_n_idx: %d] is: %f \n", static_cast<float>(accum[idx]), query_start * p.bias_strideM + accum_m, iter_key_start + accum_n, static_cast<float>(bias_tensor_ref.at({accum_m, accum_n}))); 
                 accum[idx] += bias_tensor_ref.at({accum_m, accum_n});
-                // accum[idx] += -100.0f;
               }
             },
             [&](int accum_m) {});

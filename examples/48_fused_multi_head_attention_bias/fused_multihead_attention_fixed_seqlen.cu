@@ -671,9 +671,6 @@ private:
       float abs_diff = fabs(diff);
       float abs_ref = fabs((float)vector_Input_Ref.at(i) + 1e-5f);
       float relative_diff = abs_diff / abs_ref;
-      // if(i < 8){
-      //   printf("Idx is: %d, cutlass output is: %f, reference output is: %f \n", i, (float)(vector_Input.at(i)), (float)(vector_Input_Ref.at(i))); 
-      // }
 
       if ( (isnan(vector_Input_Ref.at(i)) || isnan(abs_diff) || isinf(abs_diff)) ||  (abs_diff > abs_tol && relative_diff > rel_tol)) {
         printf("[%d/%d] diff = %f, rel_diff = %f, {computed=%f, ref=%f}.\n", int(i), int(size), abs_diff, relative_diff, (float)(vector_Input.at(i)), (float)(vector_Input_Ref.at(i)));
@@ -689,7 +686,6 @@ private:
   bool verify_() {
 
     bool passed = true;
-
     for (int32_t i = 0; i < problem_count(); ++i) {
       cutlass::gemm::GemmCoord problem0 = options.problem_sizes0.at(i);
       cutlass::gemm::GemmCoord problem1 = options.problem_sizes1.at(i);
@@ -748,7 +744,7 @@ private:
       std::vector<ElementSum> vector_Sum_Ref(problem0.m());
 
       std::vector<ElementBias> bias_Ref(layout_Bias.capacity(extent_Bias));
-      cutlass::device_memory::copy_to_host(bias_Ref.data(), block_Bias.get(), bias_Ref.size());
+      cutlass::device_memory::copy_to_host(bias_Ref.data(), block_Bias.get() + offset_Bias.at(i), bias_Ref.size());
       cutlass::TensorView<ElementBias, LayoutBias> bias_Ref_host(bias_Ref.data(), layout_Bias, extent_Bias);
 
       int n_dim = options.use_mask ? options.problem_sizes0_real.at(i).n() : problem0.n();
@@ -841,7 +837,10 @@ private:
       // printf("Pb %d: \n    Q=(offset=%d, ldq=%d)\n    K=(offset=%d, ldk=%d)\n    O=(offset=%d, ldo=%d)\n",
       //   int(i), int(offset_Q[i]), int(ldq_host[i]), int(offset_K[i]), int(ldk_host[i]), int(offset_O[i]), int(ldo_host[i]));
   
+
       bool verified_O = false;
+      // zhengzekang notice to change. 
+      // bool verified_O = true;
 
       if (!verified_O) {
         verified_O = verify_tensor_<ElementO>(matrix_O, matrix_Ref_O);
@@ -912,17 +911,14 @@ public:
       p.k_strideH = p.k_strideM * options.seq_length_kv;
       p.bias_strideH = p.bias_strideM * options.seq_length;
       p.v_strideH = p.v_strideM * options.seq_length_kv;
-      // p.o_strideH = options.head_size_v * options.seq_length;
+      p.o_strideH = options.head_size_v * options.seq_length;
 
       p.q_strideB = p.q_strideH * options.head_number;
       p.k_strideB = p.k_strideH * options.head_number;
       p.bias_strideB = p.bias_strideH * options.head_number;
       p.v_strideB = p.v_strideH * options.head_number;
-      // p.o_strideB = options.head_size_v * options.seq_length * options.head_number;
+      p.o_strideB = options.head_size_v * options.seq_length * options.head_number;
 
-      printf("bias stride M is: %d \n", p.bias_strideM); 
-      printf("bias stride H is: %d \n", p.bias_strideH); 
-      printf("bias stride B is: %d \n", p.bias_strideB); 
     }
 
     // launch kernel :)
