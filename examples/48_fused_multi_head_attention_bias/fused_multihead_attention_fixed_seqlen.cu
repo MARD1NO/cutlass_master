@@ -122,6 +122,10 @@
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+__global__ void printTensor(cutlass::half_t* data){
+  printf("idx is: %d, data val is: %f \n", threadIdx.x, static_cast<float>(data[threadIdx.x])); 
+}
+
 /// Result structure
 struct Result {
 
@@ -423,6 +427,7 @@ public:
     cutlass::Distribution::Kind init_Q_ = cutlass::Distribution::Uniform,
     cutlass::Distribution::Kind init_K_ = cutlass::Distribution::Uniform,
     cutlass::Distribution::Kind init_Bias_ = cutlass::Distribution::Uniform,
+    // cutlass::Distribution::Kind init_Bias_ = cutlass::Distribution::AllOnes,
     cutlass::Distribution::Kind init_P_ = cutlass::Distribution::Uniform,
     cutlass::Distribution::Kind init_V_ = cutlass::Distribution::Uniform,
     cutlass::Distribution::Kind init_O_ = cutlass::Distribution::Uniform,
@@ -460,8 +465,12 @@ private:
         scope_max = 8;
         scope_min = -8;
       } else {
+        // enter here. 
         scope_max = 8;
         scope_min = -8;
+        // success
+        // scope_max = 0.05;
+        // scope_min = -0.05;
       }
 
       cutlass::reference::device::BlockFillRandomUniform(
@@ -585,7 +594,7 @@ private:
     //
     // Assign pointers
     //
-
+    printf("total element is: %d \n", total_elements_Bias); 
     block_Q.reset(total_elements_Q);
     block_K.reset(total_elements_K);
     block_Bias.reset(total_elements_Bias);
@@ -642,6 +651,7 @@ private:
     initialize_tensor_(block_K.get(), total_elements_K, init_K, seed + 2);
     initialize_tensor_(block_V.get(), total_elements_V, init_V, seed + 3);
     initialize_tensor_(block_Bias.get(), total_elements_Bias, init_Bias, seed + 4);
+    // printTensor<<<1, 256>>>(block_Bias.get()); 
   }
 
   template<typename Element>
@@ -661,6 +671,10 @@ private:
       float abs_diff = fabs(diff);
       float abs_ref = fabs((float)vector_Input_Ref.at(i) + 1e-5f);
       float relative_diff = abs_diff / abs_ref;
+      // if(i < 8){
+      //   printf("Idx is: %d, cutlass output is: %f, reference output is: %f \n", i, (float)(vector_Input.at(i)), (float)(vector_Input_Ref.at(i))); 
+      // }
+
       if ( (isnan(vector_Input_Ref.at(i)) || isnan(abs_diff) || isinf(abs_diff)) ||  (abs_diff > abs_tol && relative_diff > rel_tol)) {
         printf("[%d/%d] diff = %f, rel_diff = %f, {computed=%f, ref=%f}.\n", int(i), int(size), abs_diff, relative_diff, (float)(vector_Input.at(i)), (float)(vector_Input_Ref.at(i)));
         return false;
@@ -705,9 +719,6 @@ private:
       cutlass::DeviceAllocation<ElementO>    block_Ref_O(layout_O.capacity(extent_O));
       cutlass::TensorView<ElementO, LayoutO> view_Ref_O_device(block_Ref_O.get(), layout_O, extent_O);
 
-      cutlass::DeviceAllocation<ElementBias>    block_Ref_Bias(layout_Bias.capacity(extent_Bias));
-      cutlass::TensorView<ElementBias, LayoutBias> view_Ref_Bias_device(block_Ref_Bias.get(), layout_Bias, extent_Bias);
-
       // Reference GEMM
       cutlass::reference::device::GemmComplex<
           ElementQ, LayoutQ,
@@ -737,7 +748,7 @@ private:
       std::vector<ElementSum> vector_Sum_Ref(problem0.m());
 
       std::vector<ElementBias> bias_Ref(layout_Bias.capacity(extent_Bias));
-      cutlass::device_memory::copy_to_host(bias_Ref.data(), block_Ref_Bias.get(), bias_Ref.size());
+      cutlass::device_memory::copy_to_host(bias_Ref.data(), block_Bias.get(), bias_Ref.size());
       cutlass::TensorView<ElementBias, LayoutBias> bias_Ref_host(bias_Ref.data(), layout_Bias, extent_Bias);
 
       int n_dim = options.use_mask ? options.problem_sizes0_real.at(i).n() : problem0.n();
@@ -749,8 +760,18 @@ private:
           n_dim_row = std::min(m + 1, n_dim);
         }
 
-        for(int n = 0; n < n_dim_row; n++){
-          view_Ref_host.ref().at({m, n}) += bias_Ref_host.ref().at({m, n}); 
+        if(options.add_bias){
+          for(int n = 0; n < n_dim_row; n++){
+            // printf("Accum[idx] is: %f, bias[accum_m_idx: %d, accum_n_idx: %d] is: %f \n", static_cast<float>(view_Ref_host.ref().at({m, n})), m, n, static_cast<float>(bias_Ref_host.ref().at({m, n}))); 
+            view_Ref_host.ref().at({m, n}) += bias_Ref_host.ref().at({m, n});
+            // view_Ref_host.ref().at({m, n}) += -100.0f;
+
+            // if(m == 9){
+            //   printf("Host bias at [%d, %d] val is: %f \n", m, n, static_cast<float>(bias_Ref_host.ref().at({m, n}))); 
+            // }
+            // printf("Host bias at [%d, %d] val is: %f \n", m, n, static_cast<float>(bias_Ref_host.ref().at({m, n}))); 
+
+          }
         }
 
         ElementSoftmaxCompute max = ElementSoftmaxCompute(view_Ref_host.ref().at({m, 0}));
@@ -859,6 +880,7 @@ public:
       p.query_ptr = block_Q.get();
       p.key_ptr = block_K.get();
       p.value_ptr = block_V.get();
+      p.attn_bias_ptr = block_Bias.get();
       p.logsumexp_ptr = nullptr; // Only needed for bw
       p.output_accum_ptr = nullptr;
       if (Attention::kNeedsOutputAccumulatorBuffer) {
@@ -883,15 +905,24 @@ public:
       // TODO: This might overflow for big tensors
       p.q_strideM = int32_t(ldq_host[0]);
       p.k_strideM = int32_t(ldk_host[0]);
+      p.bias_strideM = int32_t(ldbias_host[0]);
       p.v_strideM = int32_t(ldv_host[0]);
+
       p.q_strideH = p.q_strideM * options.seq_length;
       p.k_strideH = p.k_strideM * options.seq_length_kv;
+      p.bias_strideH = p.bias_strideM * options.seq_length;
       p.v_strideH = p.v_strideM * options.seq_length_kv;
-      p.o_strideH = options.head_size_v * options.seq_length;
+      // p.o_strideH = options.head_size_v * options.seq_length;
+
       p.q_strideB = p.q_strideH * options.head_number;
       p.k_strideB = p.k_strideH * options.head_number;
+      p.bias_strideB = p.bias_strideH * options.head_number;
       p.v_strideB = p.v_strideH * options.head_number;
-      p.o_strideB = options.head_size_v * options.seq_length * options.head_number;
+      // p.o_strideB = options.head_size_v * options.seq_length * options.head_number;
+
+      printf("bias stride M is: %d \n", p.bias_strideM); 
+      printf("bias stride H is: %d \n", p.bias_strideH); 
+      printf("bias stride B is: %d \n", p.bias_strideB); 
     }
 
     // launch kernel :)

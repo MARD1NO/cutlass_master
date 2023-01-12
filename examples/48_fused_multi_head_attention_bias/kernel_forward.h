@@ -1,43 +1,3 @@
-/***************************************************************************************************
- * Copyright (c) 2017 - 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- * list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * 3. Neither the name of the copyright holdvr nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- **************************************************************************************************/
-
-#pragma once
-
-#ifdef HAS_PYTORCH
-#include <ATen/ATen.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <torch/library.h>
-#endif
-
 #include <cmath>
 #include <vector>
 
@@ -69,6 +29,7 @@
 #include "gemm_kernel_utils.h"
 #include "mma_from_smem.h"
 #include "tile_smem_loader.h"
+
 
 #include <inttypes.h>
 
@@ -127,10 +88,9 @@ struct AttentionKernel {
   struct Params {
     // Input tensors
     scalar_t* query_ptr; // [num_queries, num_heads, head_dim]
-    scalar_t* key_ptr;   // [num_keys, num_heads, head_dim]
-    scalar_t* value_ptr; // [num_keys, num_heads, head_dim_value]
+    scalar_t* key_ptr; // [num_keys, num_heads, head_dim]
     scalar_t* attn_bias_ptr = nullptr; // [num_heads, num_queries, num_keys]
-    
+    scalar_t* value_ptr; // [num_keys, num_heads, head_dim_value]
     int32_t* cu_seqlens_q_ptr = nullptr;
     int32_t* cu_seqlens_k_ptr = nullptr;
 
@@ -139,6 +99,9 @@ struct AttentionKernel {
     output_accum_t*
         output_accum_ptr; // [num_queries, num_heads, head_dim_value]
     lse_scalar_t* logsumexp_ptr; // [num_heads, num_queries] - can be null
+
+    // Scale
+    accum_t scale;
 
     // Dimensions/strides
     int32_t head_dim;
@@ -158,22 +121,19 @@ struct AttentionKernel {
     int32_t q_strideH;
     int32_t k_strideH;
     int32_t v_strideH;
-    int32_t o_strideH;
     int32_t bias_strideH;
 
     int64_t q_strideB;
     int64_t k_strideB;
     int64_t v_strideB;
-    int64_t o_strideB;
     int32_t bias_strideB;
 
     int32_t num_batches;
     int32_t num_heads;
 
     CUTLASS_HOST_DEVICE int32_t o_strideM() const {
-      return head_dim_value;
+      return head_dim_value * num_heads;
     }
-
     // Moves pointers to what we should process
     // Returns "false" if there is no work to do
     CUTLASS_DEVICE bool advance_to_block() {
@@ -203,9 +163,9 @@ struct AttentionKernel {
         query_ptr += batch_id * q_strideB;
         key_ptr += batch_id * k_strideB;
         value_ptr += batch_id * v_strideB;
-        output_ptr += batch_id * o_strideB;
+        output_ptr += int64_t(batch_id * num_queries) * o_strideM();
         if (output_accum_ptr != nullptr) {
-          output_accum_ptr += batch_id * o_strideB;
+          output_accum_ptr += int64_t(batch_id * num_queries) * o_strideM();
         }
         q_start = 0;
         k_start = 0;
@@ -216,15 +176,15 @@ struct AttentionKernel {
       key_ptr += k_start * k_strideM + head_id * k_strideH;
       value_ptr += k_start * v_strideM + head_id * v_strideH;
       output_ptr += int64_t(q_start + query_start) * o_strideM() +
-          head_id * o_strideH;
-      
+          head_id * head_dim_value;
+
       if (attn_bias_ptr != nullptr) {
         attn_bias_ptr += (batch_id * bias_strideB) + (head_id * bias_strideH);
       }
 
       if (output_accum_ptr != nullptr) {
         output_accum_ptr += int64_t(q_start + query_start) * o_strideM() +
-            head_id * o_strideH;
+            head_id * head_dim_value;
       } else {
         // Accumulate directly in the destination buffer (eg for f32)
         output_accum_ptr = (accum_t*)output_ptr;
@@ -247,9 +207,9 @@ struct AttentionKernel {
       query_ptr = warp_uniform(query_ptr);
       key_ptr = warp_uniform(key_ptr);
       value_ptr = warp_uniform(value_ptr);
-      output_ptr = warp_uniform(output_ptr);
       attn_bias_ptr = warp_uniform(attn_bias_ptr);
 
+      output_ptr = warp_uniform(output_ptr);
       output_accum_ptr = warp_uniform(output_accum_ptr);
       logsumexp_ptr = warp_uniform(logsumexp_ptr);
       num_queries = warp_uniform(num_queries);
@@ -434,8 +394,8 @@ struct AttentionKernel {
   struct SharedStorageEpilogueAtEnd : ScalingCoefs {
     struct SharedStorageAfterMM0 {
       // Everything here might be overwritten during MM0
-      typename MM0::AccumulatorSharedStorage si;
       typename MM0::BiasLoader::SmemTile bias;
+      typename MM0::AccumulatorSharedStorage si;
       typename MM1::SharedStorageMM1 mm1;
     };
 
@@ -454,8 +414,8 @@ struct AttentionKernel {
   struct SharedStorageEpilogueInLoop : ScalingCoefs {
     struct SharedStorageAfterMM0 {
       // Everything here might be overwritten during MM0
-      typename MM0::AccumulatorSharedStorage si;
       typename MM0::BiasLoader::SmemTile bias;
+      typename MM0::AccumulatorSharedStorage si;
       typename MM1::SharedStorageMM1 mm1;
       typename MM1::DefaultEpilogue::SharedStorage epilogue;
     };
@@ -633,8 +593,13 @@ struct AttentionKernel {
               (tb_tile_offset.n() * MM0::Mma::WarpCount::kN) +
                   (my_warp_id / MM0::Mma::WarpCount::kM)};
 
+      // multiply by scaling factor
+      // problem is here!
+      accum = cutlass::multiplies<typename MM0::Mma::FragmentC>()(1.0f / cutlass::fast_sqrt(float(p.head_dim)), accum);
+
       // apply attention bias if applicable
       if (p.attn_bias_ptr != nullptr) {
+        auto query_start = blockIdx.x * kQueriesPerBlock;
         // load bias tile Bij into shared memory
         typename MM0::BiasLoader::GmemTileIterator bias_iter(
             {cutlass::layout::RowMajor(p.bias_strideM)},
@@ -657,8 +622,34 @@ struct AttentionKernel {
             lane_offset,
             [&](int accum_m) {},
             [&](int accum_m, int accum_n, int idx) {
+              // if (accum_m < problem_size_0_m && accum_n < problem_size_0_n) {
+              //   accum[idx] += bias_tensor_ref.at({accum_m, accum_n});
+              // }
+
               if (accum_m < problem_size_0_m && accum_n < problem_size_0_n) {
+                // if(threadIdx.x == 0 && threadIdx.y == 0){
+                //   for(int32_t row_ii = 0; row_ii < 16; row_ii++){
+                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 0, static_cast<float>(bias_tensor_ref.at({row_ii, 0}))); 
+                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 1, static_cast<float>(bias_tensor_ref.at({row_ii, 1}))); 
+                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 2, static_cast<float>(bias_tensor_ref.at({row_ii, 2}))); 
+                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 3, static_cast<float>(bias_tensor_ref.at({row_ii, 3}))); 
+                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 4, static_cast<float>(bias_tensor_ref.at({row_ii, 4}))); 
+                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 5, static_cast<float>(bias_tensor_ref.at({row_ii, 5}))); 
+                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 6, static_cast<float>(bias_tensor_ref.at({row_ii, 6}))); 
+                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 7, static_cast<float>(bias_tensor_ref.at({row_ii, 7}))); 
+                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 8, static_cast<float>(bias_tensor_ref.at({row_ii, 8}))); 
+                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 9, static_cast<float>(bias_tensor_ref.at({row_ii, 9}))); 
+                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 10, static_cast<float>(bias_tensor_ref.at({row_ii, 10}))); 
+                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 11, static_cast<float>(bias_tensor_ref.at({row_ii, 11}))); 
+                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 12, static_cast<float>(bias_tensor_ref.at({row_ii, 12}))); 
+                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 13, static_cast<float>(bias_tensor_ref.at({row_ii, 13}))); 
+                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 14, static_cast<float>(bias_tensor_ref.at({row_ii, 14}))); 
+                //     printf("Host bias at [%d, %d] val is: %f \n", row_ii, 15, static_cast<float>(bias_tensor_ref.at({row_ii, 15}))); 
+                //   }
+                // }
+                // printf("Accum[idx] is: %f, bias[accum_m_idx: %d, accum_n_idx: %d] is: %f \n", static_cast<float>(accum[idx]), accum_m, accum_n, static_cast<float>(bias_tensor_ref.at({accum_m, accum_n}))); 
                 accum[idx] += bias_tensor_ref.at({accum_m, accum_n});
+                // accum[idx] += -100.0f;
               }
             },
             [&](int accum_m) {});
@@ -683,6 +674,7 @@ struct AttentionKernel {
             },
             [&](int accum_m) {});
       }
+
       DISPATCH_BOOL(iter_key_start == 0, kIsFirst, ([&] {
                       DISPATCH_BOOL(
                           p.num_keys - iter_key_start >= kKeysPerBlock,
@@ -706,8 +698,9 @@ struct AttentionKernel {
                                 thread_id(),
                                 warp_id(),
                                 p.num_keys - iter_key_start,
-                                iteratorC_tile_offset,
-                                1.0f / cutlass::fast_sqrt(float(p.head_dim)));
+                                iteratorC_tile_offset, 
+                                // 1.0f / cutlass::fast_sqrt(float(p.head_dim))); 
+                                1.0f); 
                           }));
                     }));
 
