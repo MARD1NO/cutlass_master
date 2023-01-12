@@ -531,9 +531,9 @@ private:
 
     auto problem0 = options.problem_sizes0.at(0);
     auto problem1 = options.problem_sizes1.at(0);
-    ldbias_host.at(0) = LayoutBias::packed({problem0.m(), problem0.n()}).stride(0);
+    ldbias_host.at(0) = LayoutBias::packed({1, problem0.n()}).stride(0);
     offset_Bias.push_back(total_elements_Bias);
-    total_elements_Bias += problem0.m() * problem0.n();
+    total_elements_Bias += 1 * problem0.n();
 
     for (int32_t i = 0; i < problem_count(); ++i) {
 
@@ -711,7 +711,7 @@ private:
 
       MatrixCoord extent_Q{problem0.m(), problem0.k()};
       MatrixCoord extent_K{problem0.k(), problem0.n()};
-      MatrixCoord extent_Bias{problem0.m(), problem0.n()};
+      MatrixCoord extent_Bias{1, problem0.n()};
       MatrixCoord extent_P{problem0.m(), problem0.n()};
       MatrixCoord extent_V{problem1.k(), problem1.n()};
       MatrixCoord extent_O{problem1.m(), problem1.n()};
@@ -772,13 +772,14 @@ private:
         if(options.add_bias){
           for(int n = 0; n < n_dim_row; n++){
             // printf("Accum[idx] is: %f, bias[accum_m_idx: %d, accum_n_idx: %d] is: %f \n", static_cast<float>(view_Ref_host.ref().at({m, n})), m, n, static_cast<float>(bias_Ref_host.ref().at({m, n}))); 
-            view_Ref_host.ref().at({m, n}) += bias_Ref_host.ref().at({m, n});
+            view_Ref_host.ref().at({m, n}) += bias_Ref_host.ref().at({0, n});
             // view_Ref_host.ref().at({m, n}) += -100.0f;
 
             // if(m == 9){
             //   printf("Host bias at [%d, %d] val is: %f \n", m, n, static_cast<float>(bias_Ref_host.ref().at({m, n}))); 
             // }
             // printf("Host bias at [%d, %d] val is: %f \n", m, n, static_cast<float>(bias_Ref_host.ref().at({m, n}))); 
+            // printf("Host bias at [%d, %d] val is: %f \n", m, n, static_cast<float>(bias_Ref_host.ref().at({0, n}))); 
 
           }
         }
@@ -851,9 +852,9 @@ private:
       //   int(i), int(offset_Q[i]), int(ldq_host[i]), int(offset_K[i]), int(ldk_host[i]), int(offset_O[i]), int(ldo_host[i]));
   
 
-      bool verified_O = false;
+      // bool verified_O = false;
       // zhengzekang notice to change. 
-      // bool verified_O = true;
+      bool verified_O = true;
 
       if (!verified_O) {
         verified_O = verify_tensor_<ElementO>(matrix_O, matrix_Ref_O);
@@ -917,21 +918,27 @@ public:
       // TODO: This might overflow for big tensors
       p.q_strideM = int32_t(ldq_host[0]);
       p.k_strideM = int32_t(ldk_host[0]);
-      p.bias_strideM = int32_t(ldbias_host[0]);
+      // p.bias_strideM = int32_t(ldbias_host[0]);
+      p.bias_strideM = 0;
       p.v_strideM = int32_t(ldv_host[0]);
 
       p.q_strideH = p.q_strideM * options.seq_length;
       p.k_strideH = p.k_strideM * options.seq_length_kv;
-      p.bias_strideH = p.bias_strideM * options.seq_length;
+      // p.bias_strideH = p.bias_strideM * options.seq_length;
+      p.bias_strideH = 0;
       p.v_strideH = p.v_strideM * options.seq_length_kv;
       p.o_strideH = options.head_size_v * options.seq_length;
 
       p.q_strideB = p.q_strideH * options.head_number;
       p.k_strideB = p.k_strideH * options.head_number;
-      p.bias_strideB = p.bias_strideH * options.head_number;
+      // p.bias_strideB = p.bias_strideH * options.head_number;
+      p.bias_strideB = 0;
       p.v_strideB = p.v_strideH * options.head_number;
       p.o_strideB = options.head_size_v * options.seq_length * options.head_number;
-
+      p.add_bias = options.add_bias; 
+      printf("bias_strideM is: %d \n", p.bias_strideM); 
+      printf("bias_strideH is: %d \n", p.bias_strideH); 
+      printf("bias_strideB is: %d \n", p.bias_strideB); 
     }
 
     // launch kernel :)

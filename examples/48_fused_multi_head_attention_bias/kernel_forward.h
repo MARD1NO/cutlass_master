@@ -110,7 +110,8 @@ struct AttentionKernel {
     int32_t num_keys;
 
     bool causal;
-
+    bool add_bias; 
+    
     int32_t q_strideM;
     int32_t k_strideM;
     int32_t v_strideM;
@@ -606,11 +607,19 @@ struct AttentionKernel {
       accum = cutlass::multiplies<typename MM0::Mma::FragmentC>()(1.0f / cutlass::fast_sqrt(float(p.head_dim)), accum);
 
       // apply attention bias if applicable
-      if (p.attn_bias_ptr != nullptr) {
+      if (p.attn_bias_ptr != nullptr && p.add_bias) {
         // load bias tile Bij into shared memory
         // if(iter_key_start != 0){
           // printf("query_start * p.bias_strideM is: %d, iter_key_start is: %d \n", query_start * p.bias_strideM, iter_key_start); 
         // }
+        // typename MM0::BiasLoader::GmemTileIterator bias_iter(
+        //     {cutlass::layout::RowMajor(p.bias_strideM)},
+        //     // attn_bias_pointer points to matrix of size (n_queries, n_keys)
+        //     // for the relevant batch_id and head_id
+        //     p.attn_bias_ptr + query_start * p.bias_strideM + iter_key_start,
+        //     {problem_size_0_m, problem_size_0_n},
+        //     thread_id());
+
         typename MM0::BiasLoader::GmemTileIterator bias_iter(
             {cutlass::layout::RowMajor(p.bias_strideM)},
             // attn_bias_pointer points to matrix of size (n_queries, n_keys)
@@ -618,6 +627,8 @@ struct AttentionKernel {
             p.attn_bias_ptr + query_start * p.bias_strideM + iter_key_start,
             {problem_size_0_m, problem_size_0_n},
             thread_id());
+
+
         cutlass::TensorRef<scalar_t, cutlass::layout::RowMajor> bias_tensor_ref(
             shared_storage.after_mm0.bias.data(),
             cutlass::layout::RowMajor(MM0::ThreadblockShape::kN));
@@ -635,6 +646,9 @@ struct AttentionKernel {
               if (accum_m < problem_size_0_m && accum_n < problem_size_0_n) {
                 // printf("Accum[idx] is: %f, bias[accum_m_idx: %d, accum_n_idx: %d] is: %f \n", static_cast<float>(accum[idx]), query_start * p.bias_strideM + accum_m, iter_key_start + accum_n, static_cast<float>(bias_tensor_ref.at({accum_m, accum_n}))); 
                 accum[idx] += bias_tensor_ref.at({accum_m, accum_n});
+                // if(threadIdx.x == 0 && threadIdx.y == 0){
+                //   printf("Accum[idx] is: %f, bias[accum_m_idx: %d, accum_n_idx: %d] is: %f \n", static_cast<float>(accum[idx]), accum_m, accum_n, static_cast<float>(bias_tensor_ref.at({accum_m, accum_n}))); 
+                // }
               }
             },
             [&](int accum_m) {});
