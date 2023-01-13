@@ -613,7 +613,7 @@ struct AttentionKernel {
             // attn_bias_pointer points to matrix of size (n_queries, n_keys)
             // for the relevant batch_id and head_id
             p.attn_bias_ptr + query_start * p.bias_strideM + iter_key_start,
-            {problem_size_0_m, problem_size_0_n},
+            {1, problem_size_0_n},
             thread_id());
 
 
@@ -632,11 +632,7 @@ struct AttentionKernel {
             [&](int accum_m) {},
             [&](int accum_m, int accum_n, int idx) {
               if (accum_m < problem_size_0_m && accum_n < problem_size_0_n) {
-                // printf("Accum[idx] is: %f, bias[accum_m_idx: %d, accum_n_idx: %d] is: %f \n", static_cast<float>(accum[idx]), query_start * p.bias_strideM + accum_m, iter_key_start + accum_n, static_cast<float>(bias_tensor_ref.at({accum_m, accum_n}))); 
-                accum[idx] += bias_tensor_ref.at({accum_m, accum_n});
-                // if(threadIdx.x == 0 && threadIdx.y == 0){
-                //   printf("Accum[idx] is: %f, bias[accum_m_idx: %d, accum_n_idx: %d] is: %f \n", static_cast<float>(accum[idx]), accum_m, accum_n, static_cast<float>(bias_tensor_ref.at({accum_m, accum_n}))); 
-                // }
+                accum[idx] += bias_tensor_ref.at({0, accum_n});
               }
             },
             [&](int accum_m) {});
