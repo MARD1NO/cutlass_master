@@ -608,18 +608,6 @@ struct AttentionKernel {
 
       // apply attention bias if applicable
       if (p.attn_bias_ptr != nullptr && p.add_bias) {
-        // load bias tile Bij into shared memory
-        // if(iter_key_start != 0){
-          // printf("query_start * p.bias_strideM is: %d, iter_key_start is: %d \n", query_start * p.bias_strideM, iter_key_start); 
-        // }
-        // typename MM0::BiasLoader::GmemTileIterator bias_iter(
-        //     {cutlass::layout::RowMajor(p.bias_strideM)},
-        //     // attn_bias_pointer points to matrix of size (n_queries, n_keys)
-        //     // for the relevant batch_id and head_id
-        //     p.attn_bias_ptr + query_start * p.bias_strideM + iter_key_start,
-        //     {problem_size_0_m, problem_size_0_n},
-        //     thread_id());
-
         typename MM0::BiasLoader::GmemTileIterator bias_iter(
             {cutlass::layout::RowMajor(p.bias_strideM)},
             // attn_bias_pointer points to matrix of size (n_queries, n_keys)

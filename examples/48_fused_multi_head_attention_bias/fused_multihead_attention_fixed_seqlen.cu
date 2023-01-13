@@ -122,10 +122,6 @@
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-__global__ void printTensor(cutlass::half_t* data){
-  printf("idx is: %d, data val is: %f \n", threadIdx.x, static_cast<float>(data[threadIdx.x])); 
-}
-
 /// Result structure
 struct Result {
 
@@ -283,7 +279,7 @@ struct Options {
       << "  --iterations=<int>          Number of profiling iterations to perform.\n"
       << "  --reference-check=<bool>    If true, performs reference check.\n"
       << "  --causal=<bool>             If true, uses causal masking.\n"
-      << "  --add_bias=<bool>             If true, add bias.\n";
+      << "  --add_bias=<bool>           If true, add bias, bias shape is (1, 1, 1, k_seq_len).\n";
 
     return out;
   }
@@ -427,7 +423,6 @@ public:
     cutlass::Distribution::Kind init_Q_ = cutlass::Distribution::Uniform,
     cutlass::Distribution::Kind init_K_ = cutlass::Distribution::Uniform,
     cutlass::Distribution::Kind init_Bias_ = cutlass::Distribution::Uniform,
-    // cutlass::Distribution::Kind init_Bias_ = cutlass::Distribution::AllOnes,
     cutlass::Distribution::Kind init_P_ = cutlass::Distribution::Uniform,
     cutlass::Distribution::Kind init_V_ = cutlass::Distribution::Uniform,
     cutlass::Distribution::Kind init_O_ = cutlass::Distribution::Uniform,
@@ -465,12 +460,8 @@ private:
         scope_max = 8;
         scope_min = -8;
       } else {
-        // enter here. 
         scope_max = 8;
         scope_min = -8;
-        // success
-        // scope_max = 0.05;
-        // scope_min = -0.05;
       }
 
       cutlass::reference::device::BlockFillRandomUniform(
@@ -522,13 +513,13 @@ private:
 
     ldq_host.resize(problem_count());
     ldk_host.resize(problem_count());
-    // ldbias_host.resize(problem_count());
     ldbias_host.resize(1);
     ldp_host.resize(problem_count());
     ldv_host.resize(problem_count());
     ldo_host.resize(problem_count());
     seqlen_host.resize(problem_count());
 
+    // Bias shape is (1, 1, 1, k_seq_len)
     auto problem0 = options.problem_sizes0.at(0);
     auto problem1 = options.problem_sizes1.at(0);
     ldbias_host.at(0) = LayoutBias::packed({1, problem0.n()}).stride(0);
@@ -542,7 +533,6 @@ private:
 
       ldq_host.at(i) = LayoutQ::packed({problem0.m(), problem0.k()}).stride(0);
       ldk_host.at(i) = LayoutK::packed({problem0.k(), problem0.n()}).stride(0);
-      // ldbias_host.at(i) = LayoutBias::packed({problem0.m(), problem0.n()}).stride(0);
       ldp_host.at(i) = LayoutP::packed({problem0.m(), problem0.n()}).stride(0);
       ldv_host.at(i) = LayoutV::packed({problem1.k(), problem1.n()}).stride(0);
       ldo_host.at(i) = LayoutO::packed({problem1.m(), problem1.n()}).stride(0);
@@ -552,21 +542,18 @@ private:
 
       offset_Q.push_back(total_elements_Q);
       offset_K.push_back(total_elements_K);
-      // offset_Bias.push_back(total_elements_Bias);
       offset_P.push_back(total_elements_P);
       offset_V.push_back(total_elements_V);
       offset_O.push_back(total_elements_O);
 
       int64_t elements_Q = problem0.m() * problem0.k();
       int64_t elements_K = problem0.k() * problem0.n();
-      // int64_t elements_Bias = problem0.m() * problem0.n();
       int64_t elements_P = problem0.m() * problem0.n();
       int64_t elements_V = problem1.k() * problem1.n();
       int64_t elements_O = problem1.m() * problem1.n();
 
       total_elements_Q += elements_Q;
       total_elements_K += elements_K;
-      // total_elements_Bias += elements_Bias;
       total_elements_P += elements_P;
       total_elements_V += elements_V;
       total_elements_O += elements_O;
@@ -602,7 +589,6 @@ private:
     //
     // Assign pointers
     //
-    printf("total element is: %d \n", total_elements_Bias); 
     block_Q.reset(total_elements_Q);
     block_K.reset(total_elements_K);
     block_Bias.reset(total_elements_Bias);
@@ -662,7 +648,6 @@ private:
     initialize_tensor_(block_K.get(), total_elements_K, init_K, seed + 2);
     initialize_tensor_(block_V.get(), total_elements_V, init_V, seed + 3);
     initialize_tensor_(block_Bias.get(), total_elements_Bias, init_Bias, seed + 4);
-    // printTensor<<<1, 256>>>(block_Bias.get()); 
   }
 
   template<typename Element>
@@ -703,7 +688,6 @@ private:
 
       LayoutQ layout_Q(ldq_host.at(i));
       LayoutK layout_K(ldk_host.at(i));
-      // LayoutBias layout_Bias(ldbias_host.at(i));
       LayoutBias layout_Bias(ldbias_host.at(0));
       LayoutP layout_P(ldp_host.at(i));
       LayoutV layout_V(ldv_host.at(i));
@@ -771,16 +755,7 @@ private:
 
         if(options.add_bias){
           for(int n = 0; n < n_dim_row; n++){
-            // printf("Accum[idx] is: %f, bias[accum_m_idx: %d, accum_n_idx: %d] is: %f \n", static_cast<float>(view_Ref_host.ref().at({m, n})), m, n, static_cast<float>(bias_Ref_host.ref().at({m, n}))); 
             view_Ref_host.ref().at({m, n}) += bias_Ref_host.ref().at({0, n});
-            // view_Ref_host.ref().at({m, n}) += -100.0f;
-
-            // if(m == 9){
-            //   printf("Host bias at [%d, %d] val is: %f \n", m, n, static_cast<float>(bias_Ref_host.ref().at({m, n}))); 
-            // }
-            // printf("Host bias at [%d, %d] val is: %f \n", m, n, static_cast<float>(bias_Ref_host.ref().at({m, n}))); 
-            // printf("Host bias at [%d, %d] val is: %f \n", m, n, static_cast<float>(bias_Ref_host.ref().at({0, n}))); 
-
           }
         }
 
@@ -852,9 +827,7 @@ private:
       //   int(i), int(offset_Q[i]), int(ldq_host[i]), int(offset_K[i]), int(ldk_host[i]), int(offset_O[i]), int(ldo_host[i]));
   
 
-      // bool verified_O = false;
-      // zhengzekang notice to change. 
-      bool verified_O = true;
+      bool verified_O = false;
 
       if (!verified_O) {
         verified_O = verify_tensor_<ElementO>(matrix_O, matrix_Ref_O);
@@ -918,27 +891,21 @@ public:
       // TODO: This might overflow for big tensors
       p.q_strideM = int32_t(ldq_host[0]);
       p.k_strideM = int32_t(ldk_host[0]);
-      // p.bias_strideM = int32_t(ldbias_host[0]);
       p.bias_strideM = 0;
       p.v_strideM = int32_t(ldv_host[0]);
 
       p.q_strideH = p.q_strideM * options.seq_length;
       p.k_strideH = p.k_strideM * options.seq_length_kv;
-      // p.bias_strideH = p.bias_strideM * options.seq_length;
       p.bias_strideH = 0;
       p.v_strideH = p.v_strideM * options.seq_length_kv;
       p.o_strideH = options.head_size_v * options.seq_length;
 
       p.q_strideB = p.q_strideH * options.head_number;
       p.k_strideB = p.k_strideH * options.head_number;
-      // p.bias_strideB = p.bias_strideH * options.head_number;
       p.bias_strideB = 0;
       p.v_strideB = p.v_strideH * options.head_number;
       p.o_strideB = options.head_size_v * options.seq_length * options.head_number;
       p.add_bias = options.add_bias; 
-      printf("bias_strideM is: %d \n", p.bias_strideM); 
-      printf("bias_strideH is: %d \n", p.bias_strideH); 
-      printf("bias_strideB is: %d \n", p.bias_strideB); 
     }
 
     // launch kernel :)
