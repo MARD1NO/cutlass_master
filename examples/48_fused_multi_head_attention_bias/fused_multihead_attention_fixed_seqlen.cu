@@ -740,7 +740,6 @@ private:
       std::vector<ElementSum> vector_Sum_Ref(problem0.m());
 
       std::vector<ElementBias> bias_Ref(layout_Bias.capacity(extent_Bias));
-      // cutlass::device_memory::copy_to_host(bias_Ref.data(), block_Bias.get() + offset_Bias.at(i), bias_Ref.size());
       cutlass::device_memory::copy_to_host(bias_Ref.data(), block_Bias.get(), bias_Ref.size());
       cutlass::TensorView<ElementBias, LayoutBias> bias_Ref_host(bias_Ref.data(), layout_Bias, extent_Bias);
 

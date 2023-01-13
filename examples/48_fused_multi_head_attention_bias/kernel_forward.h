@@ -170,7 +170,7 @@ struct AttentionKernel {
         query_ptr += batch_id * q_strideB;
         key_ptr += batch_id * k_strideB;
         value_ptr += batch_id * v_strideB;
-        output_ptr += int64_t(batch_id * num_queries) * o_strideM();
+        output_ptr += batch_id * o_strideB;
         if (output_accum_ptr != nullptr) {
           output_accum_ptr += batch_id * o_strideB;
         }
@@ -186,8 +186,7 @@ struct AttentionKernel {
           head_id * o_strideH;
 
       if (attn_bias_ptr != nullptr) {
-        // const int64_t bias_offset = (batch_id * bias_strideB) + (head_id * bias_strideH); 
-        const int64_t bias_offset = (batch_id * bias_strideB) + (0 * bias_strideH); 
+        const int64_t bias_offset = (batch_id * bias_strideB) + (head_id * bias_strideH); 
         attn_bias_ptr += bias_offset; 
       }
 
