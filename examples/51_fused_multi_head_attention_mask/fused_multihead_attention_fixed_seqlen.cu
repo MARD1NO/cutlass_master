@@ -155,6 +155,7 @@ struct Options {
   bool use_mask;
   bool causal;
   bool add_mask; 
+  bool mask_broadcast_row; 
 
   std::vector<cutlass::gemm::GemmCoord> problem_sizes0;
   std::vector<cutlass::gemm::GemmCoord> problem_sizes1;
@@ -195,7 +196,8 @@ struct Options {
     use_mask(false),
     iterations(20),
     causal(false), 
-    add_mask(false)
+    add_mask(false), 
+    mask_broadcast_row(false)
   { }
 
   // Parses the command line
@@ -219,6 +221,7 @@ struct Options {
     cmd.get_cmd_line_argument("reference-check", reference_check, true);
     cmd.get_cmd_line_argument("causal", causal, true);
     cmd.get_cmd_line_argument("add_mask", add_mask, false);
+    cmd.get_cmd_line_argument("mask_broadcast_row", mask_broadcast_row, false);
     randomize_problems();
 
   }
@@ -278,7 +281,8 @@ struct Options {
       << "  --iterations=<int>          Number of profiling iterations to perform.\n"
       << "  --reference-check=<bool>    If true, performs reference check.\n"
       << "  --causal=<bool>             If true, uses causal masking.\n"
-      << "  --add_mask=<bool>           If true, add custom mask, its shape is (B, M, H, K). \n";
+      << "  --add_mask=<bool>           If true, add custom mask, its shape is (B, M, H, K). \n"
+      << "  --mask_broadcast_row=<bool> If true, custom mask will broadcast in row like: (B, M, 1, K). \n";
 
     return out;
   }
@@ -555,7 +559,10 @@ private:
 
         int64_t elements_Q = problem0.m() * problem0.k();
         int64_t elements_K = problem0.k() * problem0.n();
-        int64_t elements_Mask = problem0.m() * problem0.n();
+        int64_t elements_Mask = 0;
+        if(!options.mask_broadcast_row){
+          elements_Mask = problem0.m() * problem0.n();
+        }
         int64_t elements_P = problem0.m() * problem0.n();
         int64_t elements_V = problem1.k() * problem1.n();
         int64_t elements_O = problem1.m() * problem1.n();
@@ -773,7 +780,11 @@ private:
           if(options.add_mask){
             for(int n = 0; n < n_dim; n++){
               // printf("Mask[%d, %d] is: %f \n", m, n, float(mask_Ref_host.ref().at({m, n}))); 
-              view_Ref_host.ref().at({m, n}) += mask_Ref_host.ref().at({m, n}); 
+              if(options.mask_broadcast_row){
+                view_Ref_host.ref().at({m, n}) += mask_Ref_host.ref().at({0, n}); 
+              } else {
+                view_Ref_host.ref().at({m, n}) += mask_Ref_host.ref().at({m, n}); 
+              }
             }
           }
 
@@ -905,6 +916,9 @@ public:
       p.num_queries = options.seq_length;
       p.num_keys = options.seq_length_kv;
       p.causal = options.causal;
+      p.add_mask = options.add_mask;
+      p.mask_broadcast_row = options.mask_broadcast_row;
+
 
       // TODO: This might overflow for big tensors
       p.q_strideH = options.head_size;
@@ -917,10 +931,17 @@ public:
       p.k_strideB = p.k_strideM * options.seq_length_kv;
       p.v_strideB = p.v_strideM * options.seq_length_kv;
 
-      p.mask_strideM = p.num_keys; 
-      p.mask_strideH = p.num_queries * p.mask_strideM; 
-      p.mask_strideB = p.num_heads * p.mask_strideH; 
-
+      if(options.mask_broadcast_row){
+        // Since PETR case is: 1, 1, 1, seq_len
+        p.mask_strideM = 0; 
+        p.mask_strideH = 0; 
+        p.mask_strideB = 0; 
+      } else {
+        p.mask_strideM = p.num_keys; 
+        p.mask_strideH = p.num_queries * p.mask_strideM; 
+        p.mask_strideB = p.num_heads * p.mask_strideH; 
+      }
+      
       std::cout << "stridesQ: " << p.q_strideB << ", " << p.q_strideM << ", " << p.q_strideH << std::endl;
     }
 

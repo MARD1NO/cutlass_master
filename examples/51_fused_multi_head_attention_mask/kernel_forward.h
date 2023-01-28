@@ -140,6 +140,8 @@ struct AttentionKernel {
     int32_t num_keys;
 
     bool causal;
+    bool add_mask; 
+    bool mask_broadcast_row; 
 
     int32_t q_strideM;
     int32_t k_strideM;
@@ -631,13 +633,18 @@ struct AttentionKernel {
 
       // apply attention mask if applicable
       if (p.attn_mask_ptr != nullptr) {
+        int32_t mask_iter_m = problem_size_0_m;
+        if (p.mask_broadcast_row) {
+          mask_iter_m = 1;
+        }
+
         // load mask tile Bij into shared memory
         typename MM0::MaskLoader::GmemTileIterator mask_iter(
             {cutlass::layout::RowMajor(p.mask_strideM)},
             // attn_mask_pointer points to matrix of size (n_queries, n_keys)
             // for the relevant batch_id and head_id
             p.attn_mask_ptr + query_start * p.mask_strideM + iter_key_start,
-            {problem_size_0_m, problem_size_0_n},
+            {mask_iter_m, problem_size_0_n},
             thread_id());
         cutlass::TensorRef<scalar_t, cutlass::layout::RowMajor> mask_tensor_ref(
             shared_storage.after_mm0.mask.data(),
@@ -654,7 +661,11 @@ struct AttentionKernel {
             [&](int accum_m) {},
             [&](int accum_m, int accum_n, int idx) {
               if (accum_m < problem_size_0_m && accum_n < problem_size_0_n) {
-                accum[idx] += mask_tensor_ref.at({accum_m, accum_n});
+                if (p.mask_broadcast_row) {
+                  accum[idx] += mask_tensor_ref.at({0, accum_n});
+                } else {
+                  accum[idx] += mask_tensor_ref.at({accum_m, accum_n});
+                }
               }
             },
             [&](int accum_m) {});
