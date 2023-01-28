@@ -59,6 +59,7 @@
 #include "find_default_mma.h"
 #include "gemm_kernel_utils.h"
 #include "mma_from_smem.h"
+#include "tile_smem_loader.h"
 
 #include <inttypes.h>
 
@@ -119,6 +120,7 @@ struct AttentionKernel {
     scalar_t* query_ptr; // [num_queries, num_heads, head_dim]
     scalar_t* key_ptr; // [num_keys, num_heads, head_dim]
     scalar_t* value_ptr; // [num_keys, num_heads, head_dim_value]
+    scalar_t* attn_mask_ptr = nullptr; // [num_heads, num_queries, num_keys]
     int32_t* cu_seqlens_q_ptr = nullptr;
     int32_t* cu_seqlens_k_ptr = nullptr;
 
@@ -142,15 +144,20 @@ struct AttentionKernel {
     int32_t q_strideM;
     int32_t k_strideM;
     int32_t v_strideM;
+    int32_t mask_strideM;
 
     // Everything below is only used in `advance_to_block`
     // and shouldn't use registers
     int32_t q_strideH;
     int32_t k_strideH;
     int32_t v_strideH;
+    int32_t mask_strideH;
+
     int64_t q_strideB;
     int64_t k_strideB;
     int64_t v_strideB;
+    int32_t mask_strideB;
+
     int32_t num_batches;
     int32_t num_heads;
 
@@ -202,6 +209,10 @@ struct AttentionKernel {
       output_ptr += int64_t(q_start + query_start) * o_strideM() +
           head_id * head_dim_value;
 
+      if (attn_mask_ptr != nullptr) {
+        attn_mask_ptr += (batch_id * mask_strideB) + (head_id * mask_strideH);
+      }
+
       if (output_accum_ptr != nullptr) {
         output_accum_ptr += int64_t(q_start + query_start) * o_strideM() +
             head_id * head_dim_value;
@@ -228,6 +239,7 @@ struct AttentionKernel {
       key_ptr = warp_uniform(key_ptr);
       value_ptr = warp_uniform(value_ptr);
       output_ptr = warp_uniform(output_ptr);
+      attn_mask_ptr = warp_uniform(attn_mask_ptr);
       output_accum_ptr = warp_uniform(output_accum_ptr);
       logsumexp_ptr = warp_uniform(logsumexp_ptr);
       num_queries = warp_uniform(num_queries);
@@ -306,6 +318,14 @@ struct AttentionKernel {
                 MmaCore::WarpCount::kK ==
             kNumWarpsPerBlock,
         "");
+
+
+    using MaskLoader = TileSmemLoader<
+        scalar_t,
+        cutlass::MatrixShape<kQueriesPerBlock, kKeysPerBlock>,
+        MmaCore::kThreads,
+        // input restriction: kv_len has to be a multiple of this value
+        128 / cutlass::sizeof_bits<scalar_t>::value>;
 
     // Epilogue to store to shared-memory in a format that we can use later for
     // the second matmul
@@ -406,6 +426,7 @@ struct AttentionKernel {
     struct SharedStorageAfterMM0 {
       // Everything here might be overwritten during MM0
       typename MM0::AccumulatorSharedStorage si;
+      typename MM0::MaskLoader::SmemTile mask;
       typename MM1::SharedStorageMM1 mm1;
     };
 
@@ -425,6 +446,7 @@ struct AttentionKernel {
     struct SharedStorageAfterMM0 {
       // Everything here might be overwritten during MM0
       typename MM0::AccumulatorSharedStorage si;
+      typename MM0::MaskLoader::SmemTile mask;
       typename MM1::SharedStorageMM1 mm1;
       typename MM1::DefaultEpilogue::SharedStorage epilogue;
     };
@@ -475,6 +497,7 @@ struct AttentionKernel {
     auto& s_prime = shared_storage.s_prime;
     [[maybe_unused]] auto& si = shared_storage.after_mm0.si;
     auto& mi = shared_storage.mi;
+    const uint32_t query_start = blockIdx.x * kQueriesPerBlock;
 
     static_assert(kQueriesPerBlock < kNumWarpsPerBlock * kWarpSize, "");
     if (thread_id() < kQueriesPerBlock) {
@@ -601,6 +624,42 @@ struct AttentionKernel {
               (tb_tile_offset.n() * MM0::Mma::WarpCount::kN) +
                   (my_warp_id / MM0::Mma::WarpCount::kM)};
 
+
+      // multiply by scaling factor
+      // problem is here!
+      accum = cutlass::multiplies<typename MM0::Mma::FragmentC>()(p.scale, accum);
+
+      // apply attention mask if applicable
+      if (p.attn_mask_ptr != nullptr) {
+        // load mask tile Bij into shared memory
+        typename MM0::MaskLoader::GmemTileIterator mask_iter(
+            {cutlass::layout::RowMajor(p.mask_strideM)},
+            // attn_mask_pointer points to matrix of size (n_queries, n_keys)
+            // for the relevant batch_id and head_id
+            p.attn_mask_ptr + query_start * p.mask_strideM + iter_key_start,
+            {problem_size_0_m, problem_size_0_n},
+            thread_id());
+        cutlass::TensorRef<scalar_t, cutlass::layout::RowMajor> mask_tensor_ref(
+            shared_storage.after_mm0.mask.data(),
+            cutlass::layout::RowMajor(MM0::ThreadblockShape::kN));
+        typename MM0::MaskLoader::SmemTileIterator smem_tile_iter(
+            mask_tensor_ref, thread_id());
+        MM0::MaskLoader::load(mask_iter, smem_tile_iter);
+
+        // Pij += Bij, Pij is in register fragment and Bij is in shared memory
+        auto lane_offset = MM0::ScalingCoefsUpdater::get_lane_offset(
+            lane_id(), warp_id(), iteratorC_tile_offset);
+        MM0::ScalingCoefsUpdater::iterateRows(
+            lane_offset,
+            [&](int accum_m) {},
+            [&](int accum_m, int accum_n, int idx) {
+              if (accum_m < problem_size_0_m && accum_n < problem_size_0_n) {
+                accum[idx] += mask_tensor_ref.at({accum_m, accum_n});
+              }
+            },
+            [&](int accum_m) {});
+      }
+
       // Mask out last if causal
       if (p.causal && p.num_keys - iter_key_start <= kKeysPerBlock) {
         auto query_start = blockIdx.x * kQueriesPerBlock;
@@ -644,7 +703,7 @@ struct AttentionKernel {
                                 warp_id(),
                                 p.num_keys - iter_key_start,
                                 iteratorC_tile_offset,
-                                p.scale);
+                                1.0f);
                           }));
                     }));
 

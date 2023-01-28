@@ -154,6 +154,7 @@ struct Options {
   bool reference_check;
   bool use_mask;
   bool causal;
+  bool add_mask; 
 
   std::vector<cutlass::gemm::GemmCoord> problem_sizes0;
   std::vector<cutlass::gemm::GemmCoord> problem_sizes1;
@@ -193,7 +194,8 @@ struct Options {
     seq_length_kv(1024),
     use_mask(false),
     iterations(20),
-    causal(false)
+    causal(false), 
+    add_mask(false)
   { }
 
   // Parses the command line
@@ -216,7 +218,7 @@ struct Options {
     cmd.get_cmd_line_argument("iterations", iterations, 20);
     cmd.get_cmd_line_argument("reference-check", reference_check, true);
     cmd.get_cmd_line_argument("causal", causal, true);
-
+    cmd.get_cmd_line_argument("add_mask", add_mask, false);
     randomize_problems();
 
   }
@@ -275,7 +277,8 @@ struct Options {
       << "  --use_mask=<bool>           If true, performs padding-like masking in softmax.\n"
       << "  --iterations=<int>          Number of profiling iterations to perform.\n"
       << "  --reference-check=<bool>    If true, performs reference check.\n"
-      << "  --causal=<bool>             If true, uses causal masking.\n";
+      << "  --causal=<bool>             If true, uses causal masking.\n"
+      << "  --add_mask=<bool>           If true, add custom mask, its shape is (B, M, H, K). \n";
 
     return out;
   }
@@ -325,6 +328,7 @@ public:
 
   using ElementQ = typename Attention::scalar_t;
   using ElementK = typename Attention::scalar_t;
+  using ElementMask = typename Attention::scalar_t;
   using ElementP = typename Attention::accum_t;
   using ElementAccumulator = typename Attention::accum_t;
   using ElementV = typename Attention::scalar_t;
@@ -338,6 +342,7 @@ public:
 
   using LayoutQ = cutlass::layout::RowMajor;
   using LayoutK = cutlass::layout::ColumnMajor;
+  using LayoutMask = cutlass::layout::RowMajor;
   using LayoutP = cutlass::layout::RowMajor;
   using LayoutV = cutlass::layout::RowMajor;
   using LayoutO = cutlass::layout::RowMajor;
@@ -355,6 +360,7 @@ private:
   /// Initialization
   cutlass::Distribution::Kind init_Q;
   cutlass::Distribution::Kind init_K;
+  cutlass::Distribution::Kind init_Mask;
   cutlass::Distribution::Kind init_P;
   cutlass::Distribution::Kind init_V;
   cutlass::Distribution::Kind init_O;
@@ -366,12 +372,14 @@ private:
 
   std::vector<int64_t> offset_Q;
   std::vector<int64_t> offset_K;
+  std::vector<int64_t> offset_Mask; 
   std::vector<int64_t> offset_P;
   std::vector<int64_t> offset_V;
   std::vector<int64_t> offset_O;
 
   std::vector<int64_t> ldq_host;
   std::vector<int64_t> ldk_host;
+  std::vector<int64_t> ldmask_host; 
   std::vector<int64_t> ldp_host;
   std::vector<int64_t> ldv_host;
   std::vector<int64_t> ldo_host;
@@ -379,6 +387,7 @@ private:
 
   cutlass::DeviceAllocation<int64_t> ldq;
   cutlass::DeviceAllocation<int64_t> ldk;
+  cutlass::DeviceAllocation<int64_t> ldmask; 
   cutlass::DeviceAllocation<int64_t> ldp;
   cutlass::DeviceAllocation<int64_t> ldv;
   cutlass::DeviceAllocation<int64_t> ldo;
@@ -386,6 +395,7 @@ private:
 
   cutlass::DeviceAllocation<ElementQ> block_Q;
   cutlass::DeviceAllocation<ElementK> block_K;
+  cutlass::DeviceAllocation<ElementMask> block_Mask; 
   cutlass::DeviceAllocation<ElementP> block_P;
   cutlass::DeviceAllocation<ElementV> block_V;
   cutlass::DeviceAllocation<ElementO> block_O;
@@ -396,6 +406,7 @@ private:
 
   cutlass::DeviceAllocation<ElementQ *> ptr_Q;
   cutlass::DeviceAllocation<ElementK *> ptr_K;
+  cutlass::DeviceAllocation<ElementK *> ptr_Mask; 
   cutlass::DeviceAllocation<ElementP *> ptr_P;
   cutlass::DeviceAllocation<ElementV *> ptr_V;
   cutlass::DeviceAllocation<ElementO *> ptr_O;
@@ -410,12 +421,13 @@ public:
     Options &options_,
     cutlass::Distribution::Kind init_Q_ = cutlass::Distribution::Uniform,
     cutlass::Distribution::Kind init_K_ = cutlass::Distribution::Uniform,
+    cutlass::Distribution::Kind init_Mask_ = cutlass::Distribution::Uniform,
     cutlass::Distribution::Kind init_P_ = cutlass::Distribution::Uniform,
     cutlass::Distribution::Kind init_V_ = cutlass::Distribution::Uniform,
     cutlass::Distribution::Kind init_O_ = cutlass::Distribution::Uniform,
     uint32_t seed_ = 3080
   ):
-    options(options_), init_Q(init_Q_), init_K(init_K_), init_P(init_P_), init_V(init_V_), init_O(init_O_), seed(seed_) { }
+    options(options_), init_Q(init_Q_), init_K(init_K_), init_Mask(init_Mask_), init_P(init_P_), init_V(init_V_), init_O(init_O_), seed(seed_) { }
 
   int problem_count() const {
     return (options.head_number * options.batch_size);
@@ -493,12 +505,14 @@ private:
 
     int64_t total_elements_Q = 0;
     int64_t total_elements_K = 0;
+    int64_t total_elements_Mask = 0;
     int64_t total_elements_P = 0;
     int64_t total_elements_V = 0;
     int64_t total_elements_O = 0;
 
     ldq_host.resize(problem_count());
     ldk_host.resize(problem_count());
+    ldmask_host.resize(problem_count());
     ldp_host.resize(problem_count());
     ldv_host.resize(problem_count());
     ldo_host.resize(problem_count());
@@ -509,6 +523,7 @@ private:
     // M = sequence length
     // H = num_heads
     // K = embedding size per head
+    // But Mask shape is: B, H, M, M
     int64_t batch_offset_Q, batch_offset_K, batch_offset_V, batch_offset_O;
     for (int32_t b = 0; b < options.batch_size; ++b) {
       batch_offset_Q = total_elements_Q;
@@ -523,6 +538,7 @@ private:
 
         ldq_host.at(i) = LayoutQ::packed({problem0.m(), options.head_number * problem0.k()}).stride(0);
         ldk_host.at(i) = LayoutK::packed({options.head_number * problem0.k(), problem0.n()}).stride(0);
+        ldmask_host.at(i) = LayoutMask::packed({problem0.m(), problem0.n()}).stride(0);
         ldp_host.at(i) = LayoutP::packed({problem0.m(), problem0.n()}).stride(0);
         ldv_host.at(i) = LayoutV::packed({problem1.k(), options.head_number * problem1.n()}).stride(0);
         ldo_host.at(i) = LayoutO::packed({problem1.m(), options.head_number * problem1.n()}).stride(0);
@@ -532,18 +548,21 @@ private:
 
         offset_Q.push_back(batch_offset_Q + h * problem0.k());
         offset_K.push_back(batch_offset_K + h * problem0.k());
+        offset_Mask.push_back(total_elements_Mask);
         offset_P.push_back(total_elements_P);
         offset_V.push_back(batch_offset_V + h * problem0.k());
         offset_O.push_back(batch_offset_O + h * problem1.n());
 
         int64_t elements_Q = problem0.m() * problem0.k();
         int64_t elements_K = problem0.k() * problem0.n();
+        int64_t elements_Mask = problem0.m() * problem0.n();
         int64_t elements_P = problem0.m() * problem0.n();
         int64_t elements_V = problem1.k() * problem1.n();
         int64_t elements_O = problem1.m() * problem1.n();
 
         total_elements_Q += elements_Q;
         total_elements_K += elements_K;
+        total_elements_Mask += elements_Mask; 
         total_elements_P += elements_P;
         total_elements_V += elements_V;
         total_elements_O += elements_O;
@@ -562,6 +581,7 @@ private:
 
     ldq.reset(problem_count());
     ldk.reset(problem_count());
+    ldmask.reset(problem_count()); 
     ldp.reset(problem_count());
     ldv.reset(problem_count());
     ldo.reset(problem_count());
@@ -569,6 +589,7 @@ private:
 
     ldq.copy_from_host(ldq_host.data());
     ldk.copy_from_host(ldk_host.data());
+    ldmask.copy_from_host(ldmask_host.data()); 
     ldp.copy_from_host(ldp_host.data());
     ldv.copy_from_host(ldv_host.data());
     ldo.copy_from_host(ldo_host.data());
@@ -580,6 +601,7 @@ private:
 
     block_Q.reset(total_elements_Q);
     block_K.reset(total_elements_K);
+    block_Mask.reset(total_elements_Mask); 
     block_P.reset(total_elements_P);
     block_V.reset(total_elements_V);
     block_O.reset(total_elements_O);
@@ -591,6 +613,7 @@ private:
 
     std::vector<ElementQ *> ptr_Q_host(problem_count());
     std::vector<ElementK *> ptr_K_host(problem_count());
+    std::vector<ElementMask *> ptr_Mask_host(problem_count());
     std::vector<ElementP *> ptr_P_host(problem_count());
     std::vector<ElementV *> ptr_V_host(problem_count());
     std::vector<ElementO *> ptr_O_host(problem_count());
@@ -600,6 +623,7 @@ private:
     for (int32_t i = 0; i < problem_count(); ++i) {
       ptr_Q_host.at(i) = block_Q.get() + offset_Q.at(i);
       ptr_K_host.at(i) = block_K.get() + offset_K.at(i);
+      ptr_Mask_host.at(i) = block_Mask.get() + offset_Mask.at(i);
       ptr_P_host.at(i) = block_P.get() + offset_P.at(i);
       ptr_V_host.at(i) = block_V.get() + offset_V.at(i);
       ptr_O_host.at(i) = block_O.get() + offset_O.at(i);
@@ -611,6 +635,9 @@ private:
     ptr_K.reset(problem_count());
     ptr_K.copy_from_host(ptr_K_host.data());
     
+    ptr_Mask.reset(problem_count()); 
+    ptr_Mask.copy_from_host(ptr_Mask_host.data());
+
     ptr_P.reset(problem_count());
     ptr_P.copy_from_host(ptr_P_host.data());
 
@@ -627,7 +654,7 @@ private:
     initialize_tensor_(block_Q.get(), total_elements_Q, init_Q, seed + 1);
     initialize_tensor_(block_K.get(), total_elements_K, init_K, seed + 2);
     initialize_tensor_(block_V.get(), total_elements_V, init_V, seed + 3);
-
+    initialize_tensor_(block_Mask.get(), total_elements_Mask, init_Mask, seed + 4);
   }
 
   template<typename Element>
@@ -670,6 +697,7 @@ private:
 
       MatrixCoord extent_Q{problem0.m(), problem0.k()};
       MatrixCoord extent_K{problem0.k(), problem0.n()};
+      MatrixCoord extent_Mask{problem0.m(), problem0.n()}; 
       MatrixCoord extent_P{problem0.m(), problem0.n()};
       MatrixCoord extent_V{problem1.k(), problem1.n()};
       MatrixCoord extent_O{problem1.m(), problem1.n()};
@@ -685,6 +713,7 @@ private:
 
         LayoutQ layout_Q(ldq_host.at(i));
         LayoutK layout_K(ldk_host.at(i));
+        LayoutMask layout_Mask(ldmask_host.at(i)); 
         LayoutP layout_P(ldp_host.at(i));
         LayoutV layout_V(ldv_host.at(i));
 
@@ -695,6 +724,9 @@ private:
 
         cutlass::DeviceAllocation<ElementP>    block_Ref_P(layout_P.capacity(extent_P));
         cutlass::TensorView<ElementP, LayoutP> view_Ref_P_device(block_Ref_P.get(), layout_P, extent_P);
+
+        cutlass::DeviceAllocation<ElementMask>    block_Ref_Mask(layout_Mask.capacity(extent_Mask));
+        cutlass::TensorView<ElementMask, LayoutMask> view_Ref_Mask_device(block_Ref_Mask.get(), layout_Mask, extent_Mask);
 
         // Reference GEMM
         cutlass::reference::device::GemmComplex<
@@ -724,6 +756,10 @@ private:
         std::vector<ElementNorm> vector_Norm_Ref(problem0.m());
         std::vector<ElementSum> vector_Sum_Ref(problem0.m());
 
+        std::vector<ElementMask> mask_Ref(layout_Mask.capacity(extent_Mask));
+        cutlass::device_memory::copy_to_host(mask_Ref.data(), block_Mask.get()+ offset_Mask.at(i), mask_Ref.size());
+        cutlass::TensorView<ElementMask, LayoutMask> mask_Ref_host(mask_Ref.data(), layout_Mask, extent_Mask);
+
         int n_dim = options.use_mask ? options.problem_sizes0_real.at(i).n() : problem0.n();
 
         // Compute softmax for reference matrix
@@ -732,6 +768,15 @@ private:
           if (options.causal) {
             n_dim_row = std::min(m + 1, n_dim);
           }
+
+          // Add Mask
+          if(options.add_mask){
+            for(int n = 0; n < n_dim; n++){
+              // printf("Mask[%d, %d] is: %f \n", m, n, float(mask_Ref_host.ref().at({m, n}))); 
+              view_Ref_host.ref().at({m, n}) += mask_Ref_host.ref().at({m, n}); 
+            }
+          }
+
           ElementSoftmaxCompute max = ElementSoftmaxCompute(view_Ref_host.ref().at({m, 0}));
           for (int n = 1; n < n_dim_row; n++) {
             max = std::max(max, ElementSoftmaxCompute(view_Ref_host.ref().at({m, n})));
@@ -836,6 +881,7 @@ public:
     { // set parameters
       p.query_ptr = block_Q.get();
       p.key_ptr = block_K.get();
+      p.attn_mask_ptr = block_Mask.get(); 
       p.value_ptr = block_V.get();
       p.logsumexp_ptr = nullptr; // Only needed for bw
       p.output_accum_ptr = nullptr;
@@ -870,6 +916,11 @@ public:
       p.q_strideB = p.q_strideM * options.seq_length;
       p.k_strideB = p.k_strideM * options.seq_length_kv;
       p.v_strideB = p.v_strideM * options.seq_length_kv;
+
+      p.mask_strideM = p.num_keys; 
+      p.mask_strideH = p.num_queries * p.mask_strideM; 
+      p.mask_strideB = p.num_heads * p.mask_strideH; 
+
       std::cout << "stridesQ: " << p.q_strideB << ", " << p.q_strideM << ", " << p.q_strideH << std::endl;
     }
 
