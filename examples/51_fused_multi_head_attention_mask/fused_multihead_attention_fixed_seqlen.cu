@@ -552,30 +552,35 @@ private:
 
         offset_Q.push_back(batch_offset_Q + h * problem0.k());
         offset_K.push_back(batch_offset_K + h * problem0.k());
-        offset_Mask.push_back(total_elements_Mask);
+        if(options.mask_broadcast_row){
+          offset_Mask.push_back(0);
+        } else {
+          offset_Mask.push_back(total_elements_Mask);
+        }
         offset_P.push_back(total_elements_P);
         offset_V.push_back(batch_offset_V + h * problem0.k());
         offset_O.push_back(batch_offset_O + h * problem1.n());
 
         int64_t elements_Q = problem0.m() * problem0.k();
         int64_t elements_K = problem0.k() * problem0.n();
-        int64_t elements_Mask = 0;
-        if(!options.mask_broadcast_row){
-          elements_Mask = problem0.m() * problem0.n();
-        }
+        int64_t elements_Mask = problem0.m() * problem0.n();
         int64_t elements_P = problem0.m() * problem0.n();
         int64_t elements_V = problem1.k() * problem1.n();
         int64_t elements_O = problem1.m() * problem1.n();
 
         total_elements_Q += elements_Q;
         total_elements_K += elements_K;
-        total_elements_Mask += elements_Mask; 
+        if(options.mask_broadcast_row){
+          total_elements_Mask = problem0.n(); 
+        } else {
+          total_elements_Mask += elements_Mask; 
+        }
         total_elements_P += elements_P;
         total_elements_V += elements_V;
         total_elements_O += elements_O;
       }
     }
-
+    // printf("total elements mask is: %d \n", int32_t(total_elements_Mask)); 
     problem_sizes_device0.reset(problem_count());
     problem_sizes_device1.reset(problem_count());
     problem_sizes_device0.copy_from_host(options.problem_sizes0.data());
@@ -704,7 +709,10 @@ private:
 
       MatrixCoord extent_Q{problem0.m(), problem0.k()};
       MatrixCoord extent_K{problem0.k(), problem0.n()};
-      MatrixCoord extent_Mask{problem0.m(), problem0.n()}; 
+      MatrixCoord extent_Mask{problem0.m(), problem0.n()};
+      if(options.mask_broadcast_row){
+        extent_Mask.at(0) = 1; 
+      } 
       MatrixCoord extent_P{problem0.m(), problem0.n()};
       MatrixCoord extent_V{problem1.k(), problem1.n()};
       MatrixCoord extent_O{problem1.m(), problem1.n()};
@@ -764,6 +772,8 @@ private:
         std::vector<ElementSum> vector_Sum_Ref(problem0.m());
 
         std::vector<ElementMask> mask_Ref(layout_Mask.capacity(extent_Mask));
+        // printf("Offset Mask[i] is: %ld \n", int64_t(offset_Mask.at(i))); 
+        // printf("Mask Ref Size is: %ld \n", int64_t(mask_Ref.size())); 
         cutlass::device_memory::copy_to_host(mask_Ref.data(), block_Mask.get()+ offset_Mask.at(i), mask_Ref.size());
         cutlass::TensorView<ElementMask, LayoutMask> mask_Ref_host(mask_Ref.data(), layout_Mask, extent_Mask);
 
@@ -779,10 +789,11 @@ private:
           // Add Mask
           if(options.add_mask){
             for(int n = 0; n < n_dim; n++){
-              // printf("Mask[%d, %d] is: %f \n", m, n, float(mask_Ref_host.ref().at({m, n}))); 
               if(options.mask_broadcast_row){
+                // printf("Mask[%d, %d] is: %f \n", m, n, float(mask_Ref_host.ref().at({0, n}))); 
                 view_Ref_host.ref().at({m, n}) += mask_Ref_host.ref().at({0, n}); 
               } else {
+                // printf("Mask[%d, %d] is: %f \n", m, n, float(mask_Ref_host.ref().at({m, n}))); 
                 view_Ref_host.ref().at({m, n}) += mask_Ref_host.ref().at({m, n}); 
               }
             }
@@ -930,6 +941,10 @@ public:
       p.q_strideB = p.q_strideM * options.seq_length;
       p.k_strideB = p.k_strideM * options.seq_length_kv;
       p.v_strideB = p.v_strideM * options.seq_length_kv;
+
+      // printf("Qstride H: %ld, M: %ld, B: %ld \n", int64_t(p.q_strideH), int64_t(p.q_strideM), int64_t(p.q_strideB)); 
+      // printf("Kstride H: %ld, M: %ld, B: %ld \n", int64_t(p.k_strideH), int64_t(p.k_strideM), int64_t(p.k_strideB)); 
+      // printf("Vstride H: %ld, M: %ld, B: %ld \n", int64_t(p.v_strideH), int64_t(p.v_strideM), int64_t(p.v_strideB)); 
 
       if(options.mask_broadcast_row){
         // Since PETR case is: 1, 1, 1, seq_len
