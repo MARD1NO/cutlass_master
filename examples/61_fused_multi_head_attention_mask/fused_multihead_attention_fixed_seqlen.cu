@@ -903,7 +903,7 @@ public:
     { // set parameters
       p.query_ptr = block_Q.get();
       p.key_ptr = block_K.get();
-      p.attn_bias_ptr = block_Mask.get(); 
+      p.mask_ptr = block_Mask.get(); 
       p.value_ptr = block_V.get();
       p.logsumexp_ptr = nullptr; // Only needed for bw
       p.output_accum_ptr = nullptr;
@@ -928,7 +928,7 @@ public:
       p.num_keys = options.seq_length_kv;
       p.causal = options.causal;
       // p.add_mask = options.add_mask;
-      // p.mask_broadcast_row = options.mask_broadcast_row;
+      p.mask_broadcast_row = options.mask_broadcast_row;
 
 
       // TODO: This might overflow for big tensors
@@ -957,6 +957,16 @@ public:
       //   p.mask_strideH = p.num_queries * p.mask_strideM; 
       //   p.mask_strideB = p.num_heads * p.mask_strideH; 
       // }
+
+      p.mask_strideM = p.num_keys; 
+      p.mask_strideH = p.num_queries * p.mask_strideM; 
+      p.mask_strideB = p.num_heads * p.mask_strideH; 
+      if(options.mask_broadcast_row){
+        // Since PETR case is: 1, 1, 1, seq_len
+        p.mask_strideM = 0; 
+        p.mask_strideH = 0; 
+        p.mask_strideB = 0; 
+      }
       
       std::cout << "stridesQ: " << p.q_strideB << ", " << p.q_strideM << ", " << p.q_strideH << std::endl;
     }
@@ -1096,9 +1106,7 @@ int run_attention(Options& options) {
     true,                 // Memory is aligned
     kQueriesPerBlock,
     kKeysPerBlock,
-    kSingleValueIteration, 
-    false, 
-    false
+    kSingleValueIteration
   >;
 
   //

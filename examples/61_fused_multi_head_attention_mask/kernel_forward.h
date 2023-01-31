@@ -72,7 +72,8 @@ template <
     // This is quite slower on V100 for some reason
     // Set to false if you know at compile-time you will never need dropout
     bool kSupportsDropout = true,
-    bool kSupportsBias = true>
+    bool kSupportsMask = true, 
+    bool kMaskBroadcastRow = true>
 struct AttentionKernel {
   using scalar_t = scalar_t_;
   using accum_t = float;
@@ -106,7 +107,7 @@ struct AttentionKernel {
     scalar_t* query_ptr; // [num_queries, num_heads, head_dim]
     scalar_t* key_ptr; // [num_keys, num_heads, head_dim]
     scalar_t* value_ptr; // [num_keys, num_heads, head_dim_value]
-    scalar_t* attn_bias_ptr = nullptr; // [num_heads, num_queries, num_keys]
+    scalar_t* mask_ptr = nullptr; // [num_heads, num_queries, num_keys]
     int32_t* cu_seqlens_q_ptr = nullptr;
     int32_t* cu_seqlens_k_ptr = nullptr;
 
@@ -126,23 +127,24 @@ struct AttentionKernel {
     int32_t num_keys;
 
     bool causal;
+    bool mask_broadcast_row; 
 
     int32_t q_strideM;
     int32_t k_strideM;
     int32_t v_strideM;
-    int32_t bias_strideM = 0;
+    int32_t mask_strideM = 0;
 
     // Everything below is only used in `advance_to_block`
     // and shouldn't use registers
     int32_t q_strideH;
     int32_t k_strideH;
     int32_t v_strideH;
-    int32_t bias_strideH = 0;
+    int32_t mask_strideH = 0;
 
     int64_t q_strideB;
     int64_t k_strideB;
     int64_t v_strideB;
-    int32_t bias_strideB = 0;
+    int32_t mask_strideB = 0;
 
     int32_t num_batches;
     int32_t num_heads;
@@ -202,8 +204,8 @@ struct AttentionKernel {
       output_ptr += int64_t(q_start + query_start) * o_strideM() +
           head_id * head_dim_value;
 
-      if (kSupportsBias && attn_bias_ptr != nullptr) {
-        attn_bias_ptr += (batch_id * bias_strideB) + (head_id * bias_strideH);
+      if (kSupportsMask && mask_ptr != nullptr) {
+        mask_ptr += (batch_id * mask_strideB) + (head_id * mask_strideH);
       }
       if (output_accum_ptr != nullptr) {
         output_accum_ptr += int64_t(q_start + query_start) * o_strideM() +
@@ -236,8 +238,8 @@ struct AttentionKernel {
       query_ptr = warp_uniform(query_ptr);
       key_ptr = warp_uniform(key_ptr);
       value_ptr = warp_uniform(value_ptr);
-      if (kSupportsBias) {
-        attn_bias_ptr = warp_uniform(attn_bias_ptr);
+      if (kSupportsMask) {
+        mask_ptr = warp_uniform(mask_ptr);
       }
       output_ptr = warp_uniform(output_ptr);
       output_accum_ptr = warp_uniform(output_accum_ptr);
@@ -319,8 +321,8 @@ struct AttentionKernel {
             kNumWarpsPerBlock,
         "");
 
-    // used for efficient load of bias tile Bij from global to shared memory
-    using BiasLoader = TileSmemLoader<
+    // used for efficient load of mask_ tile Bij from global to shared memory
+    using MaskLoader = TileSmemLoader<
         scalar_t,
         cutlass::MatrixShape<kQueriesPerBlock, kKeysPerBlock>,
         MmaCore::kThreads,
@@ -427,7 +429,7 @@ struct AttentionKernel {
     struct SharedStorageAfterMM0 {
       // Everything here might be overwritten during MM0
       union {
-        typename MM0::BiasLoader::SmemTile bias;
+        typename MM0::MaskLoader::SmemTile mask;
         typename MM0::AccumulatorSharedStorage si;
       };
       typename MM1::SharedStorageMM1 mm1;
@@ -449,7 +451,7 @@ struct AttentionKernel {
     struct SharedStorageAfterMM0 {
       // Everything here might be overwritten during MM0
       union {
-        typename MM0::BiasLoader::SmemTile bias;
+        typename MM0::MaskLoader::SmemTile mask;
         typename MM0::AccumulatorSharedStorage si;
       };
       typename MM1::SharedStorageMM1 mm1;
@@ -476,17 +478,17 @@ struct AttentionKernel {
     CHECK_ALIGNED_PTR(p.query_ptr, kAlignmentQ);
     CHECK_ALIGNED_PTR(p.key_ptr, kAlignmentK);
     CHECK_ALIGNED_PTR(p.value_ptr, kAlignmentV);
-    if (kSupportsBias) {
-      CHECK_ALIGNED_PTR(p.attn_bias_ptr, kAlignmentQ);
+    if (kSupportsMask) {
+      CHECK_ALIGNED_PTR(p.mask_ptr, kAlignmentQ);
       XFORMERS_CHECK(
-          p.bias_strideB % kAlignmentQ == 0,
-          "attn_bias is not correctly aligned");
+          p.mask_strideB % kAlignmentQ == 0,
+          "attn_mask is not correctly aligned");
       XFORMERS_CHECK(
-          p.bias_strideH % kAlignmentQ == 0,
-          "attn_bias is not correctly aligned");
+          p.mask_strideH % kAlignmentQ == 0,
+          "attn_mask is not correctly aligned");
       XFORMERS_CHECK(
-          p.bias_strideM % kAlignmentQ == 0,
-          "attn_bias is not correctly aligned");
+          p.mask_strideM % kAlignmentQ == 0,
+          "attn_mask is not correctly aligned");
     }
     XFORMERS_CHECK(
         p.q_strideM % kAlignmentQ == 0, "query is not correctly aligned");
@@ -663,41 +665,49 @@ struct AttentionKernel {
                   (my_warp_id / MM0::Mma::WarpCount::kM)};
 
       // multiply by scaling factor
-      if (kSupportsBias) {
+      if (kSupportsMask) {
         accum =
             cutlass::multiplies<typename MM0::Mma::FragmentC>()(p.scale, accum);
       }
 
-      // // apply attention bias if applicable
-      // if (kSupportsBias && p.attn_bias_ptr != nullptr) {
-      //   // load bias tile Bij into shared memory
-      //   typename MM0::BiasLoader::GmemTileIterator bias_iter(
-      //       {cutlass::layout::RowMajor(p.bias_strideM)},
-      //       // attn_bias_pointer points to matrix of size (n_queries, n_keys)
-      //       // for the relevant batch_id and head_id
-      //       p.attn_bias_ptr + query_start * p.bias_strideM + iter_key_start,
-      //       {problem_size_0_m, problem_size_0_n},
-      //       thread_id());
-      //   cutlass::TensorRef<scalar_t, cutlass::layout::RowMajor> bias_tensor_ref(
-      //       shared_storage.after_mm0.bias.data(),
-      //       cutlass::layout::RowMajor(MM0::ThreadblockShape::kN));
-      //   typename MM0::BiasLoader::SmemTileIterator smem_tile_iter(
-      //       bias_tensor_ref, thread_id());
-      //   MM0::BiasLoader::load(bias_iter, smem_tile_iter);
+      int32_t mask_iter_m = kMaskBroadcastRow ? 1 : problem_size_0_m; 
 
-      //   // Pij += Bij, Pij is in register fragment and Bij is in shared memory
-      //   auto lane_offset = MM0::AccumLambdaIterator::get_lane_offset(
-      //       lane_id(), warp_id(), iteratorC_tile_offset);
-      //   MM0::AccumLambdaIterator::iterateRows(
-      //       lane_offset,
-      //       [&](int accum_m) {},
-      //       [&](int accum_m, int accum_n, int idx) {
-      //         if (accum_m < problem_size_0_m && accum_n < problem_size_0_n) {
-      //           accum[idx] += bias_tensor_ref.at({accum_m, accum_n});
-      //         }
-      //       },
-      //       [&](int accum_m) {});
-      // }
+      // apply attention mask if applicable
+      if (kSupportsMask && p.mask_ptr != nullptr) {
+        // load mask tile Bij into shared memory
+        typename MM0::MaskLoader::GmemTileIterator mask_iter(
+          {cutlass::layout::RowMajor(p.mask_strideM)},
+          // attn_mask_pointer points to matrix of size (n_queries, n_keys)
+          // for the relevant batch_id and head_id
+          p.mask_ptr + query_start * p.mask_strideM + iter_key_start,
+          {mask_iter_m, problem_size_0_n},
+          thread_id());
+
+        cutlass::TensorRef<scalar_t, cutlass::layout::RowMajor> mask_tensor_ref(
+            shared_storage.after_mm0.mask.data(),
+            cutlass::layout::RowMajor(MM0::ThreadblockShape::kN));
+        typename MM0::MaskLoader::SmemTileIterator smem_tile_iter(
+            mask_tensor_ref, thread_id());
+        MM0::MaskLoader::load(mask_iter, smem_tile_iter);
+
+        // Pij += Bij, Pij is in register fragment and Bij is in shared memory
+        auto lane_offset = MM0::AccumLambdaIterator::get_lane_offset(
+            lane_id(), warp_id(), iteratorC_tile_offset);
+      
+        MM0::AccumLambdaIterator::iterateRows(
+            lane_offset,
+            [&](int accum_m) {},
+            [&](int accum_m, int accum_n, int idx) {
+              if (accum_m < problem_size_0_m && accum_n < problem_size_0_n) {
+                if(kMaskBroadcastRow){
+                  accum[idx] += mask_tensor_ref.at({0, accum_n});
+                } else {
+                  accum[idx] += mask_tensor_ref.at({accum_m, accum_n});
+                }
+              }
+            },
+            [&](int accum_m) {});
+      }
 
       // Mask out last if causal
       if (p.causal && p.num_keys - iter_key_start <= kKeysPerBlock) {
@@ -740,7 +750,7 @@ struct AttentionKernel {
                                 warp_id(),
                                 p.num_keys - iter_key_start,
                                 iteratorC_tile_offset,
-                                kSupportsBias ? 1.0f : p.scale);
+                                kSupportsMask ? 1.0f : p.scale);
                           }));
                     }));
 
@@ -1005,7 +1015,7 @@ struct AttentionKernel {
       int8_t thread_id,
       int8_t warp_id,
       int16_t max_col,
-      typename WarpIteratorC::TensorCoord const& tile_offset,
+      typename WarpIteratorC::TensorCoord const& tile_offset, 
       float scaling) {
     /* Iterates on the accumulator and corresponding position on result matrix
 
