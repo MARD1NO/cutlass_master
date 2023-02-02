@@ -114,7 +114,7 @@ const ElementCompute beta0 = ElementCompute(kUseBias ? 1 : 0);
 const ElementCompute alpha1 = ElementCompute(1);
 const ElementCompute beta1 = ElementCompute(kUseBias ? 1 : 0);
 
-bool run_nonfused_gemm_f16_sm80(cutlass::gemm::GemmCoord problem_size) {
+bool run_nonfused_gemm_f16_sm80(cutlass::gemm::GemmCoord problem_size, int warmup, int iter) {
   using ThreadblockShape = cutlass::gemm::GemmShape<128, 128, 32>;
   using WarpShape = cutlass::gemm::GemmShape<64, 64, 32>;
   using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
@@ -163,7 +163,7 @@ bool run_nonfused_gemm_f16_sm80(cutlass::gemm::GemmCoord problem_size) {
   NonFusedDualGemmRun<Gemm0, Gemm1> nonFusedGemm;
 
   std::cout << "Running Non-fused GEMMs FP16 TN GEMMs...\n";
-  bool pass = nonFusedGemm.run(problem_size, alpha0, beta0, alpha1, beta1);
+  bool pass = nonFusedGemm.run(problem_size, alpha0, beta0, alpha1, beta1, false, warmup, iter);
   if(pass)
     std::cout << "Pass\n";
   else
@@ -199,7 +199,7 @@ struct LeftSiLUAndMul {
   }
 };
 
-bool run_fused_gemm_f16_sm80_shmem(cutlass::gemm::GemmCoord problem_size) {
+bool run_fused_gemm_f16_sm80_shmem(cutlass::gemm::GemmCoord problem_size, int warmup, int iter) {
   using ThreadblockShape = cutlass::gemm::GemmShape<128, 64, 32>;
   using WarpShape = cutlass::gemm::GemmShape<64, 32, 32>;
   using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
@@ -234,7 +234,7 @@ bool run_fused_gemm_f16_sm80_shmem(cutlass::gemm::GemmCoord problem_size) {
   DualFusedGemmRun<DualGemm> fusedGemm;
 
   std::cout << "Running Fused FP16 TN GEMMs + Epilogue2...\n";
-  bool passed = fusedGemm.run(problem_size, alpha0, beta0, alpha1, beta1);
+  bool passed = fusedGemm.run(problem_size, alpha0, beta0, alpha1, beta1, false, warmup, iter);
   if(passed)
     std::cout << "Pass\n";
   else
@@ -250,20 +250,24 @@ int main(int argc, char const **args) {
   int m; 
   int n; 
   int k; 
+  int warmup; 
+  int iter; 
   cmd.get_cmd_line_argument("m", m, 1);
   cmd.get_cmd_line_argument("n", n, 1);
   cmd.get_cmd_line_argument("k", k, 1);
+  cmd.get_cmd_line_argument("warmup", warmup, 1);
+  cmd.get_cmd_line_argument("iter", iter, 1);
 
   cutlass::gemm::GemmCoord problem_size(m, n, k);
 
 
-  std::vector<bool (*)(cutlass::gemm::GemmCoord)>funcs = {
+  std::vector<bool (*)(cutlass::gemm::GemmCoord, int, int)>funcs = {
     &run_nonfused_gemm_f16_sm80,
     &run_fused_gemm_f16_sm80_shmem
   };
 
   std::string test_name = "dual-gemm f16 bias=" + std::to_string(kUseBias) + " split_k_serial=" + std::to_string(kSplitKSerial);
-  return testRun(80, funcs, test_name, problem_size);
+  return testRun(80, funcs, test_name, problem_size, warmup, iter);
 }
 
 
