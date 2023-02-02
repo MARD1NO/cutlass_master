@@ -34,7 +34,7 @@
 
 // Run tests on GPUs 
 
-int testRun(int arch, std::vector<bool (*)()> & test_funcs, const std::string & test_name) {
+int testRun(int arch, std::vector<bool (*)(cutlass::gemm::GemmCoord)> & test_funcs, const std::string & test_name, const cutlass::gemm::GemmCoord problem_size) {
 
   bool supported = false;
 
@@ -82,7 +82,7 @@ int testRun(int arch, std::vector<bool (*)()> & test_funcs, const std::string & 
   std::cout << "Arch: SM" << arch << std::endl;
   std::cout << "Test: " << test_name << std::endl;
   for(auto func : test_funcs) {
-    pass &= func();
+    pass &= func(problem_size);
   }
 
 

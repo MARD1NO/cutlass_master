@@ -56,6 +56,7 @@ D2 = element_wise(D0, D1)
 #include "cutlass/util/reference/host/tensor_copy.h"
 #include "cutlass/util/reference/host/tensor_compare.h"
 #include "cutlass/util/reference/host/gemm.h"
+#include "cutlass/util/command_line.h"
 
 #include "device/dual_gemm.h"
 #include "thread/left_silu_and_mul.h"
@@ -64,9 +65,6 @@ D2 = element_wise(D0, D1)
 
 
 ////////////////////////////////////////////////////////////////////////////////
-
-cutlass::gemm::GemmCoord problem_size(4096, 4096, 8192);
-
 constexpr int kStages = 3;
 constexpr bool kSplitKSerial = false;
 constexpr bool kUseBias = true;
@@ -116,7 +114,7 @@ const ElementCompute beta0 = ElementCompute(kUseBias ? 1 : 0);
 const ElementCompute alpha1 = ElementCompute(1);
 const ElementCompute beta1 = ElementCompute(kUseBias ? 1 : 0);
 
-bool run_nonfused_gemm_f16_sm80() {
+bool run_nonfused_gemm_f16_sm80(cutlass::gemm::GemmCoord problem_size) {
   using ThreadblockShape = cutlass::gemm::GemmShape<128, 128, 32>;
   using WarpShape = cutlass::gemm::GemmShape<64, 64, 32>;
   using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
@@ -201,7 +199,7 @@ struct LeftSiLUAndMul {
   }
 };
 
-bool run_fused_gemm_f16_sm80_shmem() {
+bool run_fused_gemm_f16_sm80_shmem(cutlass::gemm::GemmCoord problem_size) {
   using ThreadblockShape = cutlass::gemm::GemmShape<128, 64, 32>;
   using WarpShape = cutlass::gemm::GemmShape<64, 32, 32>;
   using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
@@ -246,15 +244,26 @@ bool run_fused_gemm_f16_sm80_shmem() {
 
 }
 
-int main() {
+int main(int argc, char const **args) {
 
-  std::vector<bool (*)()>funcs = {
+  cutlass::CommandLine cmd(argc, args);
+  int m; 
+  int n; 
+  int k; 
+  cmd.get_cmd_line_argument("m", m, 1);
+  cmd.get_cmd_line_argument("n", n, 1);
+  cmd.get_cmd_line_argument("k", k, 1);
+
+  cutlass::gemm::GemmCoord problem_size(m, n, k);
+
+
+  std::vector<bool (*)(cutlass::gemm::GemmCoord)>funcs = {
     &run_nonfused_gemm_f16_sm80,
     &run_fused_gemm_f16_sm80_shmem
   };
 
   std::string test_name = "dual-gemm f16 bias=" + std::to_string(kUseBias) + " split_k_serial=" + std::to_string(kSplitKSerial);
-  return testRun(80, funcs, test_name);
+  return testRun(80, funcs, test_name, problem_size);
 }
 
 
