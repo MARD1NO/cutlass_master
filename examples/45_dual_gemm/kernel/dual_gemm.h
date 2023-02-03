@@ -40,7 +40,8 @@
 #include "cutlass/matrix_coord.h"
 #include "cutlass/semaphore.h"
 
-#include "../threadblock/dual_mma_multistage.h"
+#include "../threadblock/mma_from_smem.h"
+
 #include "../threadblock/dual_epilogue.h"
 
 /////////////////////////////////////////////////////////////////////////////////////////////////

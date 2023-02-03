@@ -46,11 +46,20 @@ D2 = element_wise(D0, D1)
 
 #include "cutlass/gemm/threadblock/threadblock_swizzle.h"
 
+#include "cutlass/epilogue/threadblock/default_epilogue_simt.h"
+#include "cutlass/epilogue/threadblock/default_epilogue_tensor_op.h"
+#include "cutlass/epilogue/threadblock/default_epilogue_volta_tensor_op.h"
 #include "cutlass/gemm/device/default_gemm_configuration.h"
+#include "cutlass/gemm/kernel/default_gemm.h"
+#include "cutlass/gemm/threadblock/default_mma.h"
+#include "cutlass/gemm/threadblock/default_mma_core_simt.h"
+#include "cutlass/gemm/threadblock/default_mma_core_sm70.h"
+#include "cutlass/gemm/threadblock/default_mma_core_sm75.h"
+#include "cutlass/gemm/threadblock/default_mma_core_sm80.h"
+
 #include "cutlass/gemm/threadblock/default_mma.h"
 #include "cutlass/epilogue/thread/linear_combination_relu.h"
 #include "cutlass/epilogue/threadblock/default_epilogue_tensor_op.h"
-
 #include "../kernel/dual_gemm.h"
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -130,7 +139,6 @@ class DualGemm {
   using ArchTag = ArchTag_;
   using ThreadblockShape = ThreadblockShape_;
   using WarpShape = WarpShape_;
-  using InstructionShape = InstructionShape_;
   using EpilogueOutputOp0 = EpilogueOutputOp0_;
   using EpilogueOutputOp1 = EpilogueOutputOp1_;
   using EpilogueOutputOp2 = EpilogueOutputOp2_;
@@ -151,25 +159,47 @@ class DualGemm {
   /// Define the threadblock-scoped matrix multiply-accumulate
   static_assert(ArchTag::kMinComputeCapability >= 80, "Only multistage is implemented");
   static_assert(kStages >= 3, "Only multistage is implemented");
-  using Mma = typename cutlass::gemm::threadblock::DefaultMma<
-      ElementA, LayoutA, kAlignmentA, ElementB, LayoutB, kAlignmentB,
-      ElementAccumulator, layout::RowMajor, arch::OpClassTensorOp, ArchTag,
-      ThreadblockShape, WarpShape, 
-      InstructionShape, Stages, Operator>::ThreadblockMma;
-  using DualMma = threadblock::DualMmaMultistage<
-    typename Mma::Shape,
-    typename Mma::IteratorA,
-    typename Mma::SmemIteratorA,
-    Mma::kCacheOpA,
-    typename Mma::IteratorB,
-    typename Mma::SmemIteratorB,
-    Mma::kCacheOpB,
-    typename Mma::ElementC,
-    typename Mma::LayoutC,
-    typename Mma::Policy,
-    Mma::kStages,
-    SharedMemoryClearOption::kNone
-  >;
+
+  using GemmType = gemm_kernel_utils::DefaultGemmType<ArchTag, ElementA>;
+  using OpClass = typename GemmType::OpClass;
+  using DefaultConfig =
+    typename cutlass::gemm::device::DefaultGemmConfiguration<
+        OpClass,
+        ArchTag,
+        ElementA,
+        ElementB,
+        ElementC, // ElementC
+        ElementC // ElementAccumulator
+        >;
+
+  // using WarpShape = cutlass::gemm::GemmShape<32, 32, GemmType::WarpK>;
+  using InstructionShape = typename GemmType::InstructionShape;
+
+  using DefaultGemm = cutlass::gemm::kernel::DefaultGemm<
+        ElementA, // ElementA,
+        LayoutA, // LayoutA,
+        kAlignmentA,
+        ElementB, // ElementB,
+        LayoutB, // LayoutB,
+        kAlignmentB,
+        ElementC,
+        cutlass::layout::RowMajor, // LayoutC,
+        ElementC,
+        OpClass,
+        ArchTag,
+        ThreadblockShape,
+        WarpShape,
+        typename GemmType::InstructionShape,
+        typename DefaultConfig::EpilogueOutputOp,
+        void, // ThreadblockSwizzle - not used
+        DefaultConfig::kStages,
+        false, // SplitKSerial
+        typename GemmType::Operator>;
+
+  using DualMmaFromSmem =
+        typename threadblock::DualMmaFromSharedMemory<
+            typename DefaultGemm::Mma>; 
+  using DualMma = typename DualMmaFromSmem::Mma;
 
   static const int kPartitionsK = ThreadblockShape::kK / WarpShape::kK;
 
